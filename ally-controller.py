@@ -204,6 +204,9 @@ def get_action():
     # print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
     # print(f"🎯 Turret received: x={turret_x}, y={turret_y}")
     if path:
+        if idx >= len(path):
+            return jsonify({"moveAD": {"command": "", "weight": 0}, "moveWS": {"command": "", "weight": 0}})
+        
         target = path[idx]
 
         dx = target[0] - pos_x
