@@ -215,7 +215,7 @@ def get_action():
         if target_angle < 0:
             target_angle += 360
 
-        angle_diff = get_angle_diff(target_angle, yaw)
+        angle_diff = get_angle_diff(target_angle, degree)
         abs_angle_diff = abs(angle_diff)
 
 
