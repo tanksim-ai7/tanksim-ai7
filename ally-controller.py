@@ -2,9 +2,29 @@ from flask import Flask, request, jsonify
 import os
 import torch
 from ultralytics import YOLO
+import math
+
+from move.dstar_lite_planner import DStarLitePlanner, ObstacleRect
 
 app = Flask(__name__)
 model = YOLO('yolov8n.pt')
+
+all_info = None # info 정보
+idx = 0 # 경로 point의 idx
+path = None # 경로에 대한 list
+dest = None # 목적지에 대한 변수
+path_flag = False # path finding 최초 여부 flag
+
+planner = DStarLitePlanner(
+    grid_min_x=0.0,
+    grid_max_x=300.0,
+    grid_min_z=0.0,
+    grid_max_z=300.0,
+    cell_size=1.0,
+    obstacle_margin=2.0,
+    allow_diagonal=True,
+)
+
 print(model.names)
 combined_commands = [
     {
@@ -147,6 +167,9 @@ def info():
     if not data:
         return jsonify({"error": "No JSON received"}), 400
 
+    global all_info
+    all_info = data # info 정보 전역변수에 저장
+
     #print("📨 /info data received:", data)
 
     # Auto-pause after 15 seconds
@@ -156,6 +179,10 @@ def info():
     #if data.get("time", 0) > 15:
     #    return jsonify({"stsaatus": "success", "control": "reset"})
     return jsonify({"status": "success", "control": ""})
+
+def get_angle_diff(target, current):
+    diff = (target - current + 180) % 360 - 180
+    return diff
 
 @app.route('/get_action', methods=['POST'])
 def get_action():
@@ -171,21 +198,126 @@ def get_action():
     turret_x = turret.get("x", 0)
     turret_y = turret.get("y", 0)
 
-    print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
-    print(f"🎯 Turret received: x={turret_x}, y={turret_y}")
+    degree = all_info['playerBodyX']
+    now_speed = all_info['playerSpeed']
 
-    if combined_commands:
-        command = combined_commands.pop(0)
-    else:
+    # print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
+    # print(f"🎯 Turret received: x={turret_x}, y={turret_y}")
+    if path:
+        target = path[idx]
+
+        dx = target[0] - pos_x
+        dz = target[1] - pos_z
+
+        distance = math.hypot(dx, dz) # 대각선 거리 -> 직선 거리
+
+        target_angle = math.degrees(math.atan2(dx, dz))
+        if target_angle < 0:
+            target_angle += 360
+
+        angle_diff = get_angle_diff(target_angle, yaw)
+        abs_angle_diff = abs(angle_diff)
+
+
+        MAX_SPEED = 20.0 
+    
+        if abs_angle_diff > 15:
+            target_speed = 0.05  
+        else:
+            target_speed = max(6, MAX_SPEED * (1 - (abs_angle_diff / 15.0)))
+
+
+        if now_speed > 5.0:
+            BRAKING_DISTANCE = 30.0
+        else:
+            BRAKING_DISTANCE = max(5.0, math.sqrt(max(0.0, now_speed)) * 4.5)
+
+        if distance < BRAKING_DISTANCE:
+            distance_ratio = max(0.0, min(1.0, distance / BRAKING_DISTANCE))
+            braking_curve = distance_ratio * distance_ratio * distance_ratio * distance_ratio
+            distance_target_speed = max(1.5, MAX_SPEED * braking_curve)
+            target_speed = min(target_speed, distance_target_speed)
+
+
+
+        forward_power = 0.0
+        brake_power = 0.0
+        ws_command = "W"
+
+        if now_speed < target_speed:
+            ws_command = "W"
+            speed_diff = target_speed - now_speed
+            forward_power = min(1.0, max(0.4, speed_diff / 1.5))
+        else:
+            if now_speed <= 3.0:
+                ws_command = "W"
+                forward_power = 0.0  
+                brake_power = 0.0
+            else:
+                ws_command = "S"
+                if now_speed > 15.0 and distance < BRAKING_DISTANCE:
+                    brake_power = 1.0
+                else:
+                    speed_gap = now_speed - target_speed
+                    brake_power = min(1.0, max(0.4, (speed_gap * speed_gap) / 1.0))
+
+                if now_speed < 8.0:
+                    brake_power = min(0.35, brake_power)
+
+
+
+        speed_ratio_squared = (now_speed / MAX_SPEED) ** 2
+        STOPPING_DISTANCE = max(5.5, speed_ratio_squared * 65.0)
+
+        if distance < STOPPING_DISTANCE and now_speed > 0.5:
+            if ws_command == "W":
+                forward_power = 0.0
+                
+            ws_command = "S"
+            
+            # 목적지에 가까워질수록(ratio가 1.0에 가까워짐), 속도가 빠를수록 강하게 제동
+            stop_distance_ratio = (STOPPING_DISTANCE - distance) / STOPPING_DISTANCE
+            stop_speed_ratio = min(1.0, now_speed / MAX_SPEED)
+            
+            # 승수를 3.5로 상향하여 65m 영역 진입과 동시에 풀 브레이크(1.0)가 조기에 걸리도록 유도
+            stopping_intensity = min(5.0, max(0.5, stop_distance_ratio * stop_speed_ratio * 15.0))
+            brake_power = max(brake_power, stopping_intensity)
+
+
+
+        speed_factor = max(0.35, 1.0 - (now_speed / 90.0))
+        turn_power = min(0.5 * speed_factor, abs_angle_diff / 20.0)
+        
+        command = {}
+        if angle_diff > 1.0:    
+            command["moveAD"] = {"command": "D", "weight": turn_power}
+        elif angle_diff < -1.0:
+            command["moveAD"] = {"command": "A", "weight": turn_power}
+        else:
+            command["moveAD"] = {"command": "", "weight": 0}
+
+        if ws_command == "W":
+            command["moveWS"] = {"command": "W", "weight": forward_power}
+        else:
+            command["moveWS"] = {"command": "S", "weight": brake_power}
+
+
+
+        angle_mitigation = max(0.15, 1.0 - (abs_angle_diff / 60.0))
+        arrival_threshold = max(1.5, (now_speed * 0.2) * angle_mitigation) 
+        
+        if distance < arrival_threshold:
+            idx += 1
+    else: # path가 없을 경우
         command = {
-            "moveWS": {"command": "STOP", "weight": 1.0},
+            "moveWS": {"command": "STOP", "weight": 0.0},
             "moveAD": {"command": "", "weight": 0.0},
             "turretQE": {"command": "", "weight": 0.0},
             "turretRF": {"command": "", "weight": 0.0},
             "fire": False
         }
 
-    print("🔁 Sent Combined Action:", command)
+    # print("🔁 Sent Combined Action:", command)
     return jsonify(command)
 
 @app.route('/update_bullet', methods=['POST'])
@@ -206,9 +338,29 @@ def set_destination():
     try:
         x, y, z = map(float, data["destination"].split(","))
         print(f"🎯 Destination set to: x={x}, y={y}, z={z}")
+
+        global dest
+        dest = (x, y, z) # 목적지 저장
+
         return jsonify({"status": "OK", "destination": {"x": x, "y": y, "z": z}})
     except Exception as e:
         return jsonify({"status": "ERROR", "message": f"Invalid format: {str(e)}"}), 400
+
+
+def update_obstacles_from_payload(payload: dict):
+    """
+    오브젝트 정보 planner class에 입력
+    """
+    obs_list = []
+    for item in payload.get("obstacles", []):
+        obs = ObstacleRect.from_min_max(
+            x_min=item["x_min"],
+            x_max=item["x_max"],
+            z_min=item["z_min"],
+            z_max=item["z_max"],
+        )
+        obs_list.append(obs)
+    planner.set_obstacles(obs_list)
 
 @app.route('/update_obstacle', methods=['POST'])
 def update_obstacle():
@@ -216,7 +368,16 @@ def update_obstacle():
     if not data:
         return jsonify({'status': 'error', 'message': 'No data received'}), 400
 
-    print("🪨 Obstacle Data:", data)
+    update_obstacles_from_payload(data)
+
+    # 최초 탐색이 아닌 경우
+    if path_flag:
+        print('경로 재탐색')
+        global path, idx
+        idx = 0
+        path = planner.find_path((all_info['playerPos']['x'], all_info['playerPos']['z']), (dest[0], dest[2]))
+        planner.plot(path, show_grid=True, title="A* Demo (300x300)", fname='path')
+
     return jsonify({'status': 'success', 'message': 'Obstacle data received'})
 
 @app.route('/collision', methods=['POST']) 
@@ -238,11 +399,12 @@ def collision():
 #Endpoint called when the episode starts
 @app.route('/init', methods=['GET'])
 def init():
+    start_point = (60, 10, 27.23)
     config = {
         "startMode": "start",  # Options: "start" or "pause"
-        "blStartX": 60,  #Blue Start Position
-        "blStartY": 10,
-        "blStartZ": 27.23,
+        "blStartX": start_point[0],  #Blue Start Position
+        "blStartY": start_point[1],
+        "blStartZ": start_point[2],
         "rdStartX": 59, #Red Start Position
         "rdStartY": 10,
         "rdStartZ": 280,
@@ -257,7 +419,15 @@ def init():
         "lux": 30000,
         "destoryObstaclesOnHit" : True
     }
-    print("🛠️ Initialization config sent via /init:", config)
+
+    global path, idx, path_flag
+    planner.reset_planner() # 처음부터 path finding을 위한 초기화
+    path = planner.find_path((start_point[0], start_point[2]), (dest[0], dest[2]))
+    planner.plot(path, show_grid=True, title="A* Demo (300x300)", fname='path')
+
+    idx = 0 # path point idx 초기화
+    path_flag = True 
+
     return jsonify(config)
 
 @app.route('/start', methods=['GET'])
