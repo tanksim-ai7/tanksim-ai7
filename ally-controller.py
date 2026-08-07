@@ -512,12 +512,10 @@ def info():
     if not data:
         return jsonify({"error": "No JSON received"}), 400
 
-<<<<<<< HEAD
     global all_info
     all_info = data # info 정보 전역변수에 저장
 
     #print("📨 /info data received:", data)
-=======
     # 디버그: /info 자체가 호출되고 있는지, 어떤 키들이 들어있는지 무조건 확인하기 위함.
     # (/info가 아예 안 불리는 건지, 불리는데 playerBodyX가 없는 건지 구분하기 위함)
     print(f"📋 /info called, keys={list(data.keys())}")
@@ -531,15 +529,12 @@ def info():
         latest_body_z = data.get("playerBodyZ")
         latest_body_updated_at = time.time()
         print(f"🧭 /info body rotation: X={latest_body_x}, Y={latest_body_y}, Z={latest_body_z}")
->>>>>>> 263804ccd93f6321e12b19a5ac16b427cc88a4ed
 
     return jsonify({"status": "success", "control": ""})
 
-<<<<<<< HEAD
 def get_angle_diff(target, current):
     diff = (target - current + 180) % 360 - 180
     return diff
-=======
 
 # ----------------------------------------------------------------------
 # A* 경로 계획 연동 엔드포인트
@@ -600,7 +595,6 @@ def update_obstacle():
     print(f"🪨 Obstacle Data received, {len(obstacles)} obstacles set")
     return jsonify({'status': 'success', 'message': 'Obstacle data received'})
 
->>>>>>> 263804ccd93f6321e12b19a5ac16b427cc88a4ed
 
 @app.route('/get_action', methods=['POST'])
 def get_action():
@@ -628,7 +622,6 @@ def get_action():
         math_angle_rad = math.radians(math_angle_deg)
         real_heading_vec = (math.cos(math_angle_rad), math.sin(math_angle_rad))
 
-<<<<<<< HEAD
     degree = all_info['playerBodyX']
     now_speed = all_info['playerSpeed']
 
@@ -752,7 +745,6 @@ def get_action():
         }
 
     # print("🔁 Sent Combined Action:", command)
-=======
     print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
     if latest_body_x is not None:
         staleness = time.time() - latest_body_updated_at if latest_body_updated_at else None
@@ -887,7 +879,6 @@ def get_action():
           f"forced_straight_countdown={forced_straight_countdown}")
 
     print(f"🔁 Sent Move Command: {command} (waypoint {path_index}/{len(current_path)})")
->>>>>>> 263804ccd93f6321e12b19a5ac16b427cc88a4ed
     return jsonify(command)
 
 
@@ -900,18 +891,6 @@ def update_bullet():
     print(f"💥 Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={data.get('hit')}")
     return jsonify({"status": "OK", "message": "Bullet impact data received"})
 
-
-<<<<<<< HEAD
-    try:
-        x, y, z = map(float, data["destination"].split(","))
-        print(f"🎯 Destination set to: x={x}, y={y}, z={z}")
-
-        global dest
-        dest = (x, y, z) # 목적지 저장
-
-        return jsonify({"status": "OK", "destination": {"x": x, "y": y, "z": z}})
-    except Exception as e:
-        return jsonify({"status": "ERROR", "message": f"Invalid format: {str(e)}"}), 400
 
 
 def update_obstacles_from_payload(payload: dict):
@@ -947,10 +926,7 @@ def update_obstacle():
 
     return jsonify({'status': 'success', 'message': 'Obstacle data received'})
 
-@app.route('/collision', methods=['POST']) 
-=======
 @app.route('/collision', methods=['POST'])
->>>>>>> 263804ccd93f6321e12b19a5ac16b427cc88a4ed
 def collision():
     data = request.get_json()
     if not data:
@@ -969,15 +945,7 @@ def collision():
 
 @app.route('/init', methods=['GET'])
 def init():
-<<<<<<< HEAD
     start_point = (60, 10, 27.23)
-    config = {
-        "startMode": "start",  # Options: "start" or "pause"
-        "blStartX": start_point[0],  #Blue Start Position
-        "blStartY": start_point[1],
-        "blStartZ": start_point[2],
-        "rdStartX": 59, #Red Start Position
-=======
     # Unity에서 재시작(에피소드 초기화) 시 이 엔드포인트가 다시 호출되는데,
     # 서버 쪽에 남아있는 경로 계획 상태를 여기서 같이 초기화하지 않으면
     # 새 에피소드에서도 이전 목적지/경로/조향 상태를 그대로 들고 있어서
@@ -986,11 +954,10 @@ def init():
 
     config = {
         "startMode": "start",
-        "blStartX": 60,
-        "blStartY": 10,
-        "blStartZ": 27.23,
+        "blStartX": start_point[0],  #Blue Start Position
+        "blStartY": start_point[1],
+        "blStartZ": start_point[2],
         "rdStartX": 59,
->>>>>>> 263804ccd93f6321e12b19a5ac16b427cc88a4ed
         "rdStartY": 10,
         "rdStartZ": 280,
         "trackingMode": True,
@@ -1004,7 +971,6 @@ def init():
         "lux": 30000,
         "destoryObstaclesOnHit": True
     }
-<<<<<<< HEAD
 
     global path, idx, path_flag
     planner.reset_planner() # 처음부터 path finding을 위한 초기화
@@ -1014,9 +980,7 @@ def init():
     idx = 0 # path point idx 초기화
     path_flag = True 
 
-=======
     print("🛠️ Initialization config sent via /init (server state reset):", config)
->>>>>>> 263804ccd93f6321e12b19a5ac16b427cc88a4ed
     return jsonify(config)
 
 
