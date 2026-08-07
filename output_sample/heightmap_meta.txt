@@ -1,0 +1,6 @@
+cell=2.0
+n=150
+size=300.0
+scans=2068
+points=2790649
+coverage=0.9847
