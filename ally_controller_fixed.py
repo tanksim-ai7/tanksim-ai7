@@ -21,6 +21,7 @@ from move.pid_controller import (
     apply_alignment_speed_limit,
     make_longitudinal_command,
     make_stop_command,
+    speed_pid
 )
 matplotlib.use("Agg")
 
@@ -33,7 +34,6 @@ path = []
 path_idx = 0 # path를 위한 idx
 all_info = None # info 정보
 dest = None # 목적지
-previous_pos = None
 
 path_planner = DStarLitePlanner() # 초기화할 때 고도정보도 같이 넣어준다.
 
@@ -123,7 +123,7 @@ def info():
 
 @app.route('/get_action', methods=['POST'])
 def get_action():
-    global path, previous_pos
+    global path
     data = request.get_json(force=True)
 
     position = data.get("position", {})
@@ -140,35 +140,19 @@ def get_action():
     float(pos_z),
     ]
 
+    # 시작/목적지 grid 변화 추적과 재계획/재플롯 시점 판단은
+    # 모두 path_planner(RiskDStarPlanner/DStarPlanner) 쪽에서 처리한다.
+    # 목적지가 바뀌었는데 grid cell은 그대로라서 재계획을 안 하던
+    # 기존 버그(후진 후 크게 도는 문제)와, 재계획 시 이미지가 갱신되지
+    # 않던 문제가 여기서 함께 해결된다.
     if dest is not None:
-
-        old_grid = (
-            path_planner.world_to_grid(
-                previous_pos,
-                clamp=True,
-            )
-            if previous_pos is not None
-            else None
-        )
-
-        new_grid = path_planner.world_to_grid(
+        new_path = path_planner.replan_if_needed(
             current_pos,
-            clamp=True,
+            (dest[0], dest[2]),
+            save_path='terrain_map',
         )
-
-        # 기존 v7과 동일하게
-        # 전차가 새로운 grid cell로 이동한 경우에만
-        # 현재 위치를 D* Lite start에 반영한다.
-        if old_grid != new_grid or not path:
-            path = path_planner.find_path(
-                current_pos,
-                (
-                    dest[0],
-                    dest[2],
-                ),
-            )
-
-    previous_pos = current_pos
+        if new_path is not None:
+            path = new_path
 
     # print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
     # print(f"🎯 Turret received: x={turret_x}, y={turret_y}")
@@ -339,7 +323,7 @@ def get_action():
 
 
     # print("🔁 Sent Combined Action:", command)
-    return jsonify({"moveAD": {"command": "", "weight": 0}, "moveWS": {"command": "", "weight": 0}})
+    return jsonify(command)
 
 @app.route('/update_bullet', methods=['POST'])
 def update_bullet():
@@ -377,10 +361,13 @@ def update_obstacle():
 
     if path_flag:
         global path, path_idx
-        path = [] # path 초기화
         path_idx = 0 # path idx 초기화
-        path = path_planner.find_path((all_info['playerPos']['x'], all_info['playerPos']['z']), (dest[0], dest[2]))
-        path_planner.plot(path, save_path='terrain_map')
+        path = path_planner.replan_if_needed(
+            (all_info['playerPos']['x'], all_info['playerPos']['z']),
+            (dest[0], dest[2]),
+            save_path='terrain_map',
+            force=True,
+        )
 
     # print("🪨 Obstacle Data:", data)
     return jsonify({'status': 'success', 'message': 'Obstacle data received'})
@@ -404,8 +391,6 @@ def collision():
 #Endpoint called when the episode starts
 @app.route('/init', methods=['GET'])
 def init():
-    global previous_pos
-    previous_pos = None
     config = {
         "startMode": "start",  # Options: "start" or "pause"
         "blStartX": 60,  #Blue Start Position
@@ -416,7 +401,7 @@ def init():
         "rdStartZ": 280,
         "trackingMode": True,
         "detectMode": False,
-        "logMode": False,
+        "logMode": True,
         "stereoCameraMode": False,
         "enemyTracking": False,
         "saveSnapshot": False,
@@ -428,8 +413,13 @@ def init():
     global path, path_idx, path_flag
 
     path_planner.set_risk_layers()
-    path = path_planner.find_path((60, 27.23), (dest[0], dest[2]))
-    path_planner.plot(path, save_path='terrain_map')
+    path_planner.reset_replan_tracking()
+    path = path_planner.replan_if_needed(
+        (60, 27.23),
+        (dest[0], dest[2]),
+        save_path='terrain_map',
+        force=True,
+    )
 
     path_idx = 0
     path_flag = True

@@ -96,6 +96,13 @@ class DStarPlanner:
 
         self.last_path: List[WorldPoint] = []
 
+        # replan_if_needed()가 "목적지/시작 grid가 바뀌었는지"를
+        # 판단하기 위해 마지막으로 재계획했던 grid를 기억해둔다.
+        # 이 상태를 여기서 관리하기 때문에 서버(main) 쪽은
+        # previous_pos 같은 걸 따로 들고 다닐 필요가 없다.
+        self._replan_start_grid: Optional[GridNode] = None
+        self._replan_goal_grid: Optional[GridNode] = None
+
         self._insert_open(self.goal, self.calculate_key(self.goal))
 
         # 고도 정보 insert
@@ -553,6 +560,69 @@ class DStarPlanner:
         self.last_path = self.ultimate_one_pass_compression(tmp)
 
         return self.last_path
+
+    # --------------------------------------------------
+    # 재계획 / 재플롯 판단 (서버 쪽 상태 관리를 없애기 위한 래퍼)
+    # --------------------------------------------------
+
+    def reset_replan_tracking(self):
+        """
+        /init 등 에피소드가 새로 시작될 때 호출한다.
+        마지막으로 재계획했던 start/goal grid 기록을 지워
+        다음 replan_if_needed() 호출이 무조건 재계획하도록 만든다.
+        """
+        self._replan_start_grid = None
+        self._replan_goal_grid = None
+
+    def replan_if_needed(self, current_pos, dest, save_path=None, force=False):
+        """
+        서버(main)가 매 tick 호출하는 단일 진입점.
+
+        기존에 서버 쪽에서 하던 일:
+            - previous_pos를 들고 다니며 grid cell이 바뀌었는지 비교
+            - dest가 바뀌었는지는 아예 비교하지 않음  <- 버그 원인
+            - plot()은 /update_obstacle, /init에서만 별도로 호출  <- 이미지 미갱신 원인
+
+        이 메서드가 하는 일:
+            1. start grid 또는 goal(목적지) grid 둘 중 하나라도 바뀌었으면
+               (혹은 아직 경로가 없으면) find_path()로 재계획한다.
+               -> "목적지가 바뀌었는데 grid cell은 그대로라서 재계획을 안 하는"
+                  기존 버그가 여기서 사라진다. 목적지 변경 자체를 직접 비교하기 때문.
+            2. 목적지가 실제로 바뀐 경우(또는 최초/강제)에만 plot()으로 이미지를 갱신한다.
+               -> 매 tick(=start grid 변화)마다 savefig를 하면 제어 루프가 느려지고
+                  그 지연이 다시 조향 진동의 원인이 될 수 있어서, "목적지 변경" 같은
+                  의미있는 이벤트에만 이미지를 다시 그린다.
+
+        Returns
+        -------
+        list[WorldPoint] | None
+            재계획을 실제로 수행했으면 새 world-path.
+            재계획이 필요 없었으면 None (호출부는 기존 path를 그대로 쓰면 된다).
+        """
+        if dest is None:
+            return None
+
+        new_start_grid = self.world_to_grid(current_pos, clamp=True)
+        new_goal_grid = self.world_to_grid(dest, clamp=True)
+
+        goal_changed = new_goal_grid != self._replan_goal_grid
+        start_changed = new_start_grid != self._replan_start_grid
+        no_path_yet = not self.last_path
+
+        if not (force or goal_changed or start_changed or no_path_yet):
+            return None
+
+        path = self.find_path(current_pos, dest)
+
+        self._replan_start_grid = new_start_grid
+        self._replan_goal_grid = new_goal_grid
+
+        # 목적지가 바뀐 경우(=사용자가 새 목적지를 준 경우)에만 이미지 갱신.
+        # 단순 이동에 의한 start grid 변화는 매 tick 일어나므로 여기서 제외한다.
+        if save_path and (force or goal_changed or no_path_yet):
+            self.plot(path, save_path=save_path)
+
+        return path
 
     def _extract_grid_path(self, max_path_length=None):
         if self.start == self.goal:
