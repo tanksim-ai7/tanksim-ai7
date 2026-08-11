@@ -33,6 +33,7 @@ path = []
 path_idx = 0 # path를 위한 idx
 all_info = None # info 정보
 dest = None # 목적지
+previous_pos = None
 
 path_planner = DStarLitePlanner() # 초기화할 때 고도정보도 같이 넣어준다.
 
@@ -122,6 +123,7 @@ def info():
 
 @app.route('/get_action', methods=['POST'])
 def get_action():
+    global path, previous_pos
     data = request.get_json(force=True)
 
     position = data.get("position", {})
@@ -133,6 +135,40 @@ def get_action():
 
     turret_x = turret.get("x", 0)
     turret_y = turret.get("y", 0)
+    current_pos = [
+    float(pos_x),
+    float(pos_z),
+    ]
+
+    if dest is not None:
+
+        old_grid = (
+            path_planner.world_to_grid(
+                previous_pos,
+                clamp=True,
+            )
+            if previous_pos is not None
+            else None
+        )
+
+        new_grid = path_planner.world_to_grid(
+            current_pos,
+            clamp=True,
+        )
+
+        # 기존 v7과 동일하게
+        # 전차가 새로운 grid cell로 이동한 경우에만
+        # 현재 위치를 D* Lite start에 반영한다.
+        if old_grid != new_grid or not path:
+            path = path_planner.find_path(
+                current_pos,
+                (
+                    dest[0],
+                    dest[2],
+                ),
+            )
+
+    previous_pos = current_pos
 
     # print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
     # print(f"🎯 Turret received: x={turret_x}, y={turret_y}")
@@ -368,6 +404,8 @@ def collision():
 #Endpoint called when the episode starts
 @app.route('/init', methods=['GET'])
 def init():
+    global previous_pos
+    previous_pos = None
     config = {
         "startMode": "start",  # Options: "start" or "pause"
         "blStartX": 60,  #Blue Start Position
