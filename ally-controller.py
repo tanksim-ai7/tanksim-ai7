@@ -44,7 +44,7 @@ def detect():
 
     results = model(image_path)
     detections = results[0].boxes.data.cpu().numpy()
-    print(results[0].boxes.data)
+    # print(results[0].boxes.data)
     target_classes = {0: "tank",1: "rock", 2: "car", 7: "truck", 15: "rock"}
     filtered_results = []
     for box in detections:
@@ -105,6 +105,9 @@ def get_action():
     turret_x = turret.get("x", 0)
     turret_y = turret.get("y", 0)
 
+    # print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
+    # print(f"🎯 Turret received: x={turret_x}, y={turret_y}")
+
     if path_idx >= len(path):
         return jsonify({"moveAD": {"command": "", "weight": 0}, "moveWS": {"command": "", "weight": 0}})
 
@@ -152,7 +155,7 @@ def update_obstacle():
         path = path_planner.find_path((all_info['playerPos']['x'], all_info['playerPos']['z']), (dest[0], dest[2]))
         path_planner.plot(path, save_path='terrain_map')
 
-    print("🪨 Obstacle Data:", data)
+    # print("🪨 Obstacle Data:", data)
     return jsonify({'status': 'success', 'message': 'Obstacle data received'})
 
 @app.route('/collision', methods=['POST']) 
@@ -208,12 +211,12 @@ def init():
     path_idx = 0
     path_flag = True
     
-    print("🛠️ Initialization config sent via /init:", config)
+    # print("🛠️ Initialization config sent via /init:", config)
     return jsonify(config)
 
 @app.route('/start', methods=['GET'])
 def start():
-    print("🚀 /start command received")
+    # print("🚀 /start command received")
     return jsonify({"control": ""})
 
 if __name__ == '__main__':

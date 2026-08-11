@@ -28,7 +28,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from dstar_lite_planner_cost import DStarPlanner, INF
+from move.dstar_lite_planner_cost import DStarPlanner, INF
 
 
 class RiskDStarPlanner(DStarPlanner):
@@ -338,6 +338,7 @@ class RiskDStarPlanner(DStarPlanner):
                 output = Path(save_path)
                 output.parent.mkdir(parents=True, exist_ok=True)
                 fig.savefig(output, dpi=150, bbox_inches="tight")
+                print("grid 저장 완료")
     
             if show:
                 plt.show()
