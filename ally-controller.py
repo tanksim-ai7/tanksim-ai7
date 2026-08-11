@@ -19,7 +19,7 @@ path_idx = 0 # path를 위한 idx
 all_info = None # info 정보
 dest = None # 목적지
 
-path_planner = DStarLitePlanner()
+path_planner = DStarLitePlanner() # 초기화할 때 고도정보도 같이 넣어준다.
 
 def update_dstar_obstacles_from_payload(payload: dict):
     obs_list = []
@@ -197,12 +197,6 @@ def init():
         "destoryObstaclesOnHit" : True
     }
     global path, path_idx, path_flag
-
-    loaded_data = np.load('move/risk_layers.npz')
-    loaded_data = loaded_data['height']
-    loaded_data = np.flipud(loaded_data)
-    loaded_data = np.rot90(loaded_data, k=-1)
-    path_planner.update_entire_heightmap(loaded_data)
 
     path_planner.set_risk_layers()
     path = path_planner.find_path((60, 27.23), (dest[0], dest[2]))

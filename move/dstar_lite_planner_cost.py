@@ -98,6 +98,13 @@ class DStarPlanner:
 
         self._insert_open(self.goal, self.calculate_key(self.goal))
 
+        # 고도 정보 insert
+        loaded_data = np.load('move/risk_layers.npz')
+        loaded_data = loaded_data['height']
+        loaded_data = np.flipud(loaded_data)
+        loaded_data = np.rot90(loaded_data, k=-1)
+        self.update_entire_heightmap(loaded_data)
+
     # --------------------------------------------------
     # 좌표 변환
     # --------------------------------------------------
