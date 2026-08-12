@@ -562,6 +562,59 @@ class DStarPlanner:
         return self.last_path
 
     # --------------------------------------------------
+    # 시작점 hard obstacle 갇힘 비상 탈출
+    # --------------------------------------------------
+
+    def clear_start_area(self, position, max_radius=2):
+        """
+        시작 위치가 hard obstacle 셀 안에 갇혀 find_path()가
+        ValueError를 던질 때만 쓰는 비상 탈출 로직.
+
+        주의 (중요):
+            이 메서드는 obstacles 집합에서 셀을 "영구적으로" 지운다.
+            그래서 정상 주행 중에 매 tick 호출하면 안 된다 — 그렇게 하면
+            전차가 지뢰 등 진짜 위험 지역 옆을 지나갈 때마다 주변 셀이
+            계속 안전지대로 지워져서, 실제로는 위험한 곳을 D* Lite가
+            자유롭게 통행 가능하다고 착각하고 그 위에서 방향을 틀거나
+            머무는 현상이 생길 수 있다.
+            (replan_if_needed()에서 find_path() 실패 시에만 호출하는 이유)
+
+        radius를 고정값으로 한번에 넓게 지우지 않고, 0칸부터 시작해서
+        시작 셀 자체가 자유로워지는 순간 바로 멈춘다 — 꼭 필요한 최소
+        범위만 뚫어서 반경 안에 있는 다른 진짜 장애물까지 같이 지워지는
+        것을 최대한 막기 위함이다.
+
+        obstacle_rectangles(시각화용 원본 도형 목록)는 건드리지 않으므로
+        plot() 이미지에는 위험 지역이 계속 표시된다 — 경로탐색용 grid
+        판정만 patch되는 것이다.
+
+        Returns
+        -------
+        set[GridNode]
+            실제로 obstacle에서 제외된 셀들.
+        """
+        center = self.world_to_grid(position, clamp=True)
+        changed = set()
+
+        for r in range(0, max_radius + 1):
+            for dx in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    cell = (center[0] + dx, center[1] + dz)
+
+                    if self.in_bounds(cell) and cell in self.obstacles:
+                        self.obstacles.discard(cell)
+                        changed.add(cell)
+
+            # 시작 셀 자체가 자유로워졌으면 더 넓힐 필요 없다.
+            if self.is_free(center):
+                break
+
+        if changed:
+            self.rebuild_clearance_costs()
+
+        return changed
+
+    # --------------------------------------------------
     # 재계획 / 재플롯 판단 (서버 쪽 상태 관리를 없애기 위한 래퍼)
     # --------------------------------------------------
 
@@ -612,7 +665,21 @@ class DStarPlanner:
         if not (force or goal_changed or start_changed or no_path_yet):
             return None
 
-        path = self.find_path(current_pos, dest)
+        try:
+            path = self.find_path(current_pos, dest)
+        except ValueError:
+            # 시작 위치가 hard obstacle 안에 갇힌 경우에만 여기로 온다.
+            # 정상 주행 중에는 find_path()가 성공하므로 이 블록은 실행되지 않는다
+            # -> clear_start_area()가 매 tick 도는 게 아니라 "진짜 갇혔을 때"만 도는 이유.
+            cleared = self.clear_start_area(current_pos)
+
+            if not cleared:
+                # 지울 hard obstacle이 없는데도 실패했다면
+                # (예: goal 자체가 막혀 있음) 더 손쓸 수 없으므로 포기한다.
+                self.last_path = []
+                return []
+
+            path = self.find_path(current_pos, dest)
 
         self._replan_start_grid = new_start_grid
         self._replan_goal_grid = new_goal_grid
