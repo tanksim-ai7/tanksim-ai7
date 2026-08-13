@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import os
+import threading
 import torch
 from ultralytics import YOLO
 from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
@@ -36,6 +37,7 @@ all_info = None # info 정보
 dest = None # 목적지
 
 path_planner = DStarLitePlanner() # 초기화할 때 고도정보도 같이 넣어준다.
+planner_lock = threading.Lock() # threaded 동시 요청시 작업 중인 내용 보호 용도
 
 def update_dstar_obstacles_from_payload(payload: dict):
     obs_list = []
@@ -140,17 +142,14 @@ def get_action():
     float(pos_z),
     ]
 
-    # 시작/목적지 grid 변화 추적과 재계획/재플롯 시점 판단은
-    # 모두 path_planner(RiskDStarPlanner/DStarPlanner) 쪽에서 처리한다.
-    # 목적지가 바뀌었는데 grid cell은 그대로라서 재계획을 안 하던
-    # 기존 버그(후진 후 크게 도는 문제)와, 재계획 시 이미지가 갱신되지
-    # 않던 문제가 여기서 함께 해결된다.
+
     if dest is not None:
-        new_path = path_planner.replan_if_needed(
-            current_pos,
-            (dest[0], dest[2]),
-            save_path='terrain_map',
-        )
+        with planner_lock:
+            new_path = path_planner.replan_if_needed(
+                current_pos,
+                (dest[0], dest[2]),
+                save_path='terrain_map',
+            )
         if new_path is not None:
             path = new_path
 
@@ -357,17 +356,19 @@ def update_obstacle():
     if not data:
         return jsonify({'status': 'error', 'message': 'No data received'}), 400
 
-    update_dstar_obstacles_from_payload(data)
+    with planner_lock:
+        update_dstar_obstacles_from_payload(data)
 
     if path_flag:
         global path, path_idx
         path_idx = 0 # path idx 초기화
-        path = path_planner.replan_if_needed(
-            (all_info['playerPos']['x'], all_info['playerPos']['z']),
-            (dest[0], dest[2]),
-            save_path='terrain_map',
-            force=True,
-        )
+        with planner_lock:
+            path = path_planner.replan_if_needed(
+                (all_info['playerPos']['x'], all_info['playerPos']['z']),
+                (dest[0], dest[2]),
+                save_path='terrain_map',
+                force=True,
+            )
 
     # print("🪨 Obstacle Data:", data)
     return jsonify({'status': 'success', 'message': 'Obstacle data received'})
@@ -412,14 +413,15 @@ def init():
     }
     global path, path_idx, path_flag
 
-    path_planner.set_risk_layers()
-    path_planner.reset_replan_tracking()
-    path = path_planner.replan_if_needed(
-        (60, 27.23),
-        (dest[0], dest[2]),
-        save_path='terrain_map',
-        force=True,
-    )
+    with planner_lock:
+        path_planner.set_risk_layers()
+        path_planner.reset_replan_tracking()
+        path = path_planner.replan_if_needed(
+            (60, 27.23),
+            (dest[0], dest[2]),
+            save_path='terrain_map',
+            force=True,
+        )
 
     path_idx = 0
     path_flag = True
@@ -433,4 +435,5 @@ def start():
     return jsonify({"control": ""})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, threaded=True)
+    # threaded=True: 병렬 처리 - 여러 요청이 동시에 들어와도 하나가 끝날 때까지 기다리지 않고 동시에 처리

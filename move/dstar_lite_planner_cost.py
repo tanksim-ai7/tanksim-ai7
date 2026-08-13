@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import heapq
 import math
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 import numpy as np
 
@@ -565,24 +568,20 @@ class DStarPlanner:
     # 시작점 hard obstacle 갇힘 비상 탈출
     # --------------------------------------------------
 
-    def clear_start_area(self, position, max_radius=2):
+    def clear_start_area(self, position, radius=2):
         """
-        시작 위치가 hard obstacle 셀 안에 갇혀 find_path()가
-        ValueError를 던질 때만 쓰는 비상 탈출 로직.
+        position 주변 radius 칸 이내의 hard obstacle/통행 불가 지형을
+        "영구적으로" 강제 해제하는 비상 도구.
 
         주의 (중요):
-            이 메서드는 obstacles 집합에서 셀을 "영구적으로" 지운다.
+            obstacles/terrain_blocked 집합에서 셀을 영구적으로 지운다.
             그래서 정상 주행 중에 매 tick 호출하면 안 된다 — 그렇게 하면
             전차가 지뢰 등 진짜 위험 지역 옆을 지나갈 때마다 주변 셀이
             계속 안전지대로 지워져서, 실제로는 위험한 곳을 D* Lite가
-            자유롭게 통행 가능하다고 착각하고 그 위에서 방향을 틀거나
-            머무는 현상이 생길 수 있다.
-            (replan_if_needed()에서 find_path() 실패 시에만 호출하는 이유)
+            자유롭게 통행 가능하다고 착각할 수 있다.
+            (_find_path_with_recovery()에서 "실제로 막혀 있을 때"만
+            호출하는 이유)
 
-        radius를 고정값으로 한번에 넓게 지우지 않고, 0칸부터 시작해서
-        시작 셀 자체가 자유로워지는 순간 바로 멈춘다 — 꼭 필요한 최소
-        범위만 뚫어서 반경 안에 있는 다른 진짜 장애물까지 같이 지워지는
-        것을 최대한 막기 위함이다.
 
         obstacle_rectangles(시각화용 원본 도형 목록)는 건드리지 않으므로
         plot() 이미지에는 위험 지역이 계속 표시된다 — 경로탐색용 grid
@@ -591,28 +590,109 @@ class DStarPlanner:
         Returns
         -------
         set[GridNode]
-            실제로 obstacle에서 제외된 셀들.
+            실제로 통행 가능 상태로 바뀐 셀들.
         """
         center = self.world_to_grid(position, clamp=True)
-        changed = set()
+        changed_obstacles = set()
+        changed_terrain = set()
+        terrain_blocked = getattr(self, "terrain_blocked", None)
 
-        for r in range(0, max_radius + 1):
-            for dx in range(-r, r + 1):
-                for dz in range(-r, r + 1):
-                    cell = (center[0] + dx, center[1] + dz)
+        for dx in range(-radius, radius + 1):
+            for dz in range(-radius, radius + 1):
+                cell = (center[0] + dx, center[1] + dz)
 
-                    if self.in_bounds(cell) and cell in self.obstacles:
-                        self.obstacles.discard(cell)
-                        changed.add(cell)
+                if not self.in_bounds(cell):
+                    continue
 
-            # 시작 셀 자체가 자유로워졌으면 더 넓힐 필요 없다.
-            if self.is_free(center):
-                break
+                if cell in self.obstacles:
+                    self.obstacles.discard(cell)
+                    changed_obstacles.add(cell)
 
-        if changed:
+                if terrain_blocked is not None and cell in terrain_blocked:
+                    terrain_blocked.discard(cell)
+                    changed_terrain.add(cell)
+
+        if changed_obstacles or changed_terrain:
+            # rebuild_clearance_costs()만으로는 부족하다 — D* Lite의 내부
+            # g/rhs 그래프는 update_vertex()를 호출해야만 "이 셀이 이제
+            # 통행 가능하다"는 사실을 실제로 반영한다.
             self.rebuild_clearance_costs()
 
-        return changed
+            affected_nodes = set(changed_obstacles) | set(changed_terrain)
+            for x, z in list(affected_nodes):
+                for dx in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        neighbor = (x + dx, z + dz)
+                        if self.in_bounds(neighbor):
+                            affected_nodes.add(neighbor)
+
+            for node in affected_nodes:
+                self.update_vertex(node)
+
+        if changed_obstacles:
+            print(
+                f"⚠️ clear_start_area: {center} 주변 반경 {radius}칸 중 장애물 "
+                f"{len(changed_obstacles)}칸을 비상 해제했습니다."
+            )
+
+        if changed_terrain:
+            print(
+                f"⚠️ clear_start_area: {center} 주변 반경 {radius}칸 중 통행 불가 지형 "
+                f"{len(changed_terrain)}칸을 비상 해제했습니다 (경사 등 실제 위험 지역일 수 있음)."
+            )
+
+        return changed_obstacles | changed_terrain
+
+    def _find_path_with_recovery(self, current_pos, dest, max_radius=6):
+        """
+        find_path()를 시도하고, 실패하면 clear_start_area()로 점점 더
+        넓게 뚫어가며 재시도한다. 매 반경 단계마다 실제로 find_path()를
+        다시 돌려서 "진짜로 경로가 나오는지"를 직접 확인한다 — is_free()
+        판정만으로는 큰 장애물 덩어리 안의 작은 섬에 갇힌 경우를 놓칠
+        수 있기 때문이다 (clear_start_area 참고).
+
+        시작점/목적지 어느 쪽이 막혀 있는지 모두 확인해서 필요한 쪽을
+        같이 뚫는다.
+        """
+        try:
+            path = self.find_path(current_pos, dest)
+        except ValueError:
+            path = []
+
+        if path:
+            return path
+
+        start_grid = self.world_to_grid(current_pos, clamp=True)
+        goal_grid = self.world_to_grid(dest, clamp=True)
+        start_blocked = not self.is_free(start_grid)
+        goal_blocked = not self.is_free(goal_grid)
+
+        if not (start_blocked or goal_blocked):
+            # 둘 다 멀쩡한데 경로가 없다 -> clear_start_area로 고칠 수 있는
+            # 문제가 아니라 진짜로 단절된 지형이다. 반경을 키워봐야 소용없다.
+            return []
+
+        for radius in range(1, max_radius + 1):
+            if start_blocked:
+                self.clear_start_area(current_pos, radius=radius)
+            if goal_blocked:
+                self.clear_start_area(dest, radius=radius)
+
+            try:
+                path = self.find_path(current_pos, dest)
+            except ValueError:
+                path = []
+
+            if path:
+                print(f"✅ _find_path_with_recovery: 반경 {radius}칸까지 비상 해제 후 경로를 찾았습니다.")
+                return path
+
+        print(
+            f"⚠️ _find_path_with_recovery: 반경 {max_radius}칸까지 비상 해제해봤지만 "
+            f"{start_grid} -> {goal_grid} 경로를 찾지 못했습니다. "
+            "장애물이 반경보다 넓게 퍼져 있거나 진짜로 단절된 지역일 수 있습니다."
+        )
+        return []
 
     # --------------------------------------------------
     # 재계획 / 재플롯 판단 (서버 쪽 상태 관리를 없애기 위한 래퍼)
@@ -631,25 +711,17 @@ class DStarPlanner:
         """
         서버(main)가 매 tick 호출하는 단일 진입점.
 
-        기존에 서버 쪽에서 하던 일:
-            - previous_pos를 들고 다니며 grid cell이 바뀌었는지 비교
-            - dest가 바뀌었는지는 아예 비교하지 않음  <- 버그 원인
-            - plot()은 /update_obstacle, /init에서만 별도로 호출  <- 이미지 미갱신 원인
-
         이 메서드가 하는 일:
-            1. start grid 또는 goal(목적지) grid 둘 중 하나라도 바뀌었으면
-               (혹은 아직 경로가 없으면) find_path()로 재계획한다.
-               -> "목적지가 바뀌었는데 grid cell은 그대로라서 재계획을 안 하는"
-                  기존 버그가 여기서 사라진다. 목적지 변경 자체를 직접 비교하기 때문.
-            2. 목적지가 실제로 바뀐 경우(또는 최초/강제)에만 plot()으로 이미지를 갱신한다.
-               -> 매 tick(=start grid 변화)마다 savefig를 하면 제어 루프가 느려지고
-                  그 지연이 다시 조향 진동의 원인이 될 수 있어서, "목적지 변경" 같은
-                  의미있는 이벤트에만 이미지를 다시 그린다.
+            1. start grid 또는 goal(목적지) grid가 실제로 바뀌었을 때만
+               (혹은 force=True일 때만) find_path()로 재계획한다.
+            2. 시작점/목적지가 막혀서 실패하면 _find_path_with_recovery()가
+               반경을 점점 늘려가며 실제로 경로가 나올 때까지 재시도한다.
+            3. 목적지가 실제로 바뀐 경우(또는 최초/강제)에만 plot()으로 이미지를 갱신한다.
 
         Returns
         -------
         list[WorldPoint] | None
-            재계획을 실제로 수행했으면 새 world-path.
+            재계획을 실제로 시도했으면 새 world-path (실패 시 빈 리스트).
             재계획이 필요 없었으면 None (호출부는 기존 path를 그대로 쓰면 된다).
         """
         if dest is None:
@@ -660,34 +732,18 @@ class DStarPlanner:
 
         goal_changed = new_goal_grid != self._replan_goal_grid
         start_changed = new_start_grid != self._replan_start_grid
-        no_path_yet = not self.last_path
 
-        if not (force or goal_changed or start_changed or no_path_yet):
+        if not (force or goal_changed or start_changed):
             return None
 
-        try:
-            path = self.find_path(current_pos, dest)
-        except ValueError:
-            # 시작 위치가 hard obstacle 안에 갇힌 경우에만 여기로 온다.
-            # 정상 주행 중에는 find_path()가 성공하므로 이 블록은 실행되지 않는다
-            # -> clear_start_area()가 매 tick 도는 게 아니라 "진짜 갇혔을 때"만 도는 이유.
-            cleared = self.clear_start_area(current_pos)
-
-            if not cleared:
-                # 지울 hard obstacle이 없는데도 실패했다면
-                # (예: goal 자체가 막혀 있음) 더 손쓸 수 없으므로 포기한다.
-                self.last_path = []
-                return []
-
-            path = self.find_path(current_pos, dest)
+        path = self._find_path_with_recovery(current_pos, dest)
 
         self._replan_start_grid = new_start_grid
         self._replan_goal_grid = new_goal_grid
 
-        # 목적지가 바뀐 경우(=사용자가 새 목적지를 준 경우)에만 이미지 갱신.
-        # 단순 이동에 의한 start grid 변화는 매 tick 일어나므로 여기서 제외한다.
-        if save_path and (force or goal_changed or no_path_yet):
-            self.plot(path, save_path=save_path)
+
+        if save_path and (force or goal_changed):
+            self.plot_async(path, save_path=save_path)
 
         return path
 
@@ -949,6 +1005,101 @@ class DStarPlanner:
             plt.show()
         else:
             plt.close(fig)
+
+    # --------------------------------------------------
+    # 논블로킹 렌더링 (RiskDStarPlanner.plot_async와 동일한 목적)
+    # --------------------------------------------------
+
+    def plot_async(self, path=None, show_grid=True, title="D* Lite", save_path=None):
+        """
+        plot()과 같은 그림을 그리지만, 실제 렌더링은 별도 스레드에서
+        수행하고 이 함수는 즉시 리턴한다.
+        """
+        active_path = list(self.last_path if path is None else path)
+        obstacle_rectangles_snapshot = list(self.obstacle_rectangles)
+        start_snapshot = self.start
+        goal_snapshot = self.goal
+        obstacle_margin_snapshot = self.obstacle_margin
+
+        thread = threading.Thread(
+            target=self._render_and_save,
+            args=(
+                active_path,
+                obstacle_rectangles_snapshot,
+                start_snapshot,
+                goal_snapshot,
+                obstacle_margin_snapshot,
+                show_grid,
+                title,
+                save_path,
+            ),
+            daemon=True,
+        )
+        thread.start()
+
+    def _render_and_save(self, active_path, obstacle_rectangles, start, goal,
+                          obstacle_margin, show_grid, title, save_path):
+        """
+        plot_async()가 뜬 스냅샷으로 실제 렌더링을 수행한다.
+        pyplot을 쓰지 않고 Figure를 직접 만들어서 스레드 간 간섭을 피한다.
+        """
+        fig = Figure(figsize=(8, 8))
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+
+        height_matrix = np.zeros((self.width, self.height))
+        for ix in range(self.width):
+            for iz in range(self.height):
+                height_matrix[ix, iz] = self.y.get((ix, iz), 0.0)
+        height_matrix = height_matrix.T
+
+        im = ax.imshow(
+            height_matrix,
+            cmap='terrain',
+            origin='lower',
+            extent=[0, self.width, 0, self.height],
+            zorder=1,
+        )
+
+        for obs in obstacle_rectangles:
+            patch = Rectangle(
+                (obs.x_min - obstacle_margin, obs.z_min - obstacle_margin),
+                (obs.x_max - obs.x_min) + 2 * obstacle_margin,
+                (obs.z_max - obs.z_min) + 2 * obstacle_margin,
+                alpha=0.5,
+            )
+            ax.add_patch(patch)
+
+        if active_path:
+            px = [point[0] for point in active_path]
+            pz = [point[1] for point in active_path]
+            ax.plot(px, pz, marker="o", markersize=2, label="D* Lite Path")
+            ax.scatter(px[0], pz[0], s=80, marker="o", label="Start")
+            ax.scatter(px[-1], pz[-1], s=120, marker="*", label="Goal")
+        else:
+            ax.scatter(start[0], start[1], s=80, marker="o", label="Start")
+            ax.scatter(goal[0], goal[1], s=120, marker="*", label="Goal")
+
+        ax.set_xlim(0, self.width)
+        ax.set_ylim(0, self.height)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label("Height / Altitude (meters)", rotation=275, labelpad=15)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Z")
+        ax.set_title(title)
+
+        if show_grid:
+            ax.grid(True, alpha=0.3)
+
+        ax.legend()
+        fig.tight_layout()
+
+        if save_path:
+            output = Path(save_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            canvas.print_figure(output, dpi=150, bbox_inches="tight")
+            print("grid 저장 완료 (백그라운드)")
 
         return fig, ax
 

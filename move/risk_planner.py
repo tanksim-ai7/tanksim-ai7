@@ -23,10 +23,13 @@ risk_planner.py - DStarPlanner 에 위험 비용 레이어를 얹는다
 """
 import math
 import numpy as np
+import threading
 
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from move.dstar_lite_planner_cost import DStarPlanner, INF
 
@@ -346,3 +349,112 @@ class RiskDStarPlanner(DStarPlanner):
                 plt.close(fig)
     
             return fig, ax
+
+    # --------------------------------------------------
+    # 논블로킹 렌더링
+    # --------------------------------------------------
+
+    def plot_async(self, path=None, show_grid=True, title="D* Lite", save_path=None):
+        # plot()(matplotlib 저장)이 응답을 막지 않도록 
+        # 별도 스레드로 돌리되, 그리는 데 필요한 값만 미리 
+        # 복사(스냅샷)해서 넘겨 다른 요청과 충돌 없이 안전하게 렌더링하기 위함.
+        active_path = list(self.last_path if path is None else path)
+        terrain_blocked_snapshot = set(getattr(self, "terrain_blocked", set()))
+        obstacle_rectangles_snapshot = list(self.obstacle_rectangles)
+        start_snapshot = self.start
+        goal_snapshot = self.goal
+        obstacle_margin_snapshot = self.obstacle_margin
+
+        thread = threading.Thread(
+            target=self._render_and_save,
+            args=(
+                active_path,
+                terrain_blocked_snapshot,
+                obstacle_rectangles_snapshot,
+                start_snapshot,
+                goal_snapshot,
+                obstacle_margin_snapshot,
+                show_grid,
+                title,
+                save_path,
+            ),
+            daemon=True,
+        )
+        thread.start()
+
+    def _render_and_save(self, active_path, terrain_blocked, obstacle_rectangles,
+                          start, goal, obstacle_margin, show_grid, title, save_path):
+        """
+        plot_async()가 뜬 스냅샷으로 실제 렌더링을 수행한다.
+        pyplot을 쓰지 않고 Figure를 직접 만들어서, 다른 스레드가 동시에
+        plot()/plot_async()를 불러도 서로 간섭하지 않는다.
+        """
+        fig = Figure(figsize=(8, 8))
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+
+        height_matrix = np.zeros((self.width, self.height))
+        for ix in range(self.width):
+            for iz in range(self.height):
+                height_matrix[ix, iz] = self.y.get((ix, iz), 0.0)
+        height_matrix = height_matrix.T
+
+        im = ax.imshow(
+            height_matrix,
+            cmap='terrain',
+            origin='lower',
+            extent=[0, self.width, 0, self.height],
+            zorder=1,
+        )
+
+        for x, z in terrain_blocked:
+            rect_grid = Rectangle(
+                ((x + 0.5) - 0.5, (z + 0.5) - 0.5),
+                1.0, 1.0,
+                facecolor='magenta',
+                edgecolor='none',
+                alpha=0.3,
+                zorder=2,
+            )
+            ax.add_patch(rect_grid)
+        ax.plot([], [], color='magenta', alpha=0.3, label="Blocked Terrain", linestyle='-', linewidth=5)
+
+        for obs in obstacle_rectangles:
+            patch = Rectangle(
+                (obs.x_min - obstacle_margin, obs.z_min - obstacle_margin),
+                (obs.x_max - obs.x_min) + 2 * obstacle_margin,
+                (obs.z_max - obs.z_min) + 2 * obstacle_margin,
+                alpha=0.5,
+            )
+            ax.add_patch(patch)
+
+        if active_path:
+            px = [point[0] for point in active_path]
+            pz = [point[1] for point in active_path]
+            ax.plot(px, pz, marker="o", markersize=2, label="D* Lite Path")
+            ax.scatter(px[0], pz[0], s=80, marker="o", label="Start")
+            ax.scatter(px[-1], pz[-1], s=120, marker="*", label="Goal")
+        else:
+            ax.scatter(start[0], start[1], s=80, marker="o", label="Start")
+            ax.scatter(goal[0], goal[1], s=120, marker="*", label="Goal")
+
+        ax.set_xlim(0, self.width)
+        ax.set_ylim(0, self.height)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label("Height / Altitude (meters)", rotation=275, labelpad=15)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Z")
+        ax.set_title(title)
+
+        if show_grid:
+            ax.grid(True, alpha=0.3)
+
+        ax.legend()
+        fig.tight_layout()
+
+        if save_path:
+            output = Path(save_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            canvas.print_figure(output, dpi=150, bbox_inches="tight")
+            print("grid 저장 완료 (백그라운드)")
