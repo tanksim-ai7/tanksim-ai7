@@ -39,18 +39,6 @@ dest = None # 목적지
 path_planner = DStarLitePlanner() # 초기화할 때 고도정보도 같이 넣어준다.
 planner_lock = threading.Lock() # threaded 동시 요청시 작업 중인 내용 보호 용도
 
-def update_dstar_obstacles_from_payload(payload: dict):
-    obs_list = []
-    for item in payload.get("obstacles", []):
-        obs = DStarLiteObstacleRect.from_min_max(
-            x_min=item["x_min"],
-            x_max=item["x_max"],
-            z_min=item["z_min"],
-            z_max=item["z_max"],
-        )
-        obs_list.append(obs)
-    path_planner.set_obstacles(obs_list)
-
 @app.route('/detect', methods=['POST'])
 def detect():
     image = request.files.get('image')
@@ -357,7 +345,7 @@ def update_obstacle():
         return jsonify({'status': 'error', 'message': 'No data received'}), 400
 
     with planner_lock:
-        update_dstar_obstacles_from_payload(data)
+        path_planner.update_dstar_obstacles_from_payload(data)
 
     if path_flag:
         global path, path_idx

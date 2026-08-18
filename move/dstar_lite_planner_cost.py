@@ -18,20 +18,52 @@ GridNode = Tuple[int, int]
 WorldPoint = Tuple[float, float]
 INF = float("inf")
 
+# 자연물이 아닌 오브젝트에 대해서 값을 가지고 있어야 한다.
+# 최초에 자연물이 아닌 모든 오브젝트의 값은 unknown_list에 있어야한다.
+# 시뮬레이션을 진행하면서 unknown이였던 오브젝트가 team, enemy 등과 같이 특정이 된다면
+# unknown_list에서 빼주고
+# 해당하는 list에 넣어줘야한다.
+# (각 오브젝트 type에 따라 각자 다른 로직을 타야하기 때문에)
+unknown_list = [] # 최초에 여기에 자연물이 아닌 모든 오브젝트들을 넣어줘야 함
+enemy_list = []
+enemy_tank_list = []
+team_list = []
+team_tank_list = []
+
 @dataclass(frozen=True)
 class ObstacleRect:
     x_min: float
     x_max: float
     z_min: float
     z_max: float
+    type: str = 'nature'
+    # nature: 자연물
+    # unknown: 아군/적군 여부를 알 수 없는 오브젝트
+    # enemy: 적군 오브젝트
+    # enemy_tank: 적군 탱크
+    # team: 아군 오브젝트
+    # team_tank: 아군 탱크
 
     @classmethod
     def from_min_max(cls, x_min, x_max, z_min, z_max):
+        type = 'nature'
+        if (x_min, x_max, z_min, z_max) in unknown_list :
+            type = 'unknown'
+        elif (x_min, x_max, z_min, z_max) in enemy_list :
+            type = 'enemy'
+        elif (x_min, x_max, z_min, z_max) in team_list :
+            type = 'team'
+        elif (x_min, x_max, z_min, z_max) in enemy_tank_list :
+            type = 'enemy_tank'
+        elif (x_min, x_max, z_min, z_max) in team_tank_list :
+            type = 'team_tank'
+
         return cls(
             x_min=min(float(x_min), float(x_max)),
             x_max=max(float(x_min), float(x_max)),
             z_min=min(float(z_min), float(z_max)),
             z_max=max(float(z_min), float(z_max)),
+            type=type,
         )
 
 
@@ -114,6 +146,19 @@ class DStarPlanner:
         loaded_data = np.flipud(loaded_data)
         loaded_data = np.rot90(loaded_data, k=-1)
         self.update_entire_heightmap(loaded_data)
+
+
+    def update_dstar_obstacles_from_payload(self, payload: dict):
+        obs_list = []
+        for item in payload.get("obstacles", []):
+            obs = ObstacleRect.from_min_max(
+                x_min=item["x_min"],
+                x_max=item["x_max"],
+                z_min=item["z_min"],
+                z_max=item["z_max"],
+            )
+            obs_list.append(obs)
+        self.set_obstacles(obs_list)
 
     # --------------------------------------------------
     # 좌표 변환
@@ -846,6 +891,43 @@ class DStarPlanner:
     # 장애물
     # --------------------------------------------------
 
+    # 현재 미사용
+    def _is_visible_under_height(self, p1: Tuple[float, float], p2: Tuple[float, float], max_allowed_y: float) -> bool:
+        """
+        적에 대해서 기존 고도에 따른 이동 가능/불가능한 영역 설정을 위한 함수
+        p1: 적 탱크의 중심 좌표(min, max 값의 중간값)
+        p2: 반복문으로 계속 받아오는 값으로(범위를 의미) min~max까지의 좌표값
+        max_allowed_y: min~max안의 모든 좌표에서 가장 높은 고도 값 +3
+        """
+        x1, z1 = p1
+        x2, z2 = p2
+        dist = math.hypot(x2 - x1, z2 - z1)
+        if dist == 0: 
+            return True
+        
+        target_ix, target_iz = self.world_to_grid((x2, z2), True)
+        target_grid_y = self.y.get((target_ix, target_iz), 0)
+        
+        step_size = 0.5
+        steps = int(dist / step_size)
+        for i in range(1, steps):
+            t = i / steps
+            cx = x1 + (x2 - x1) * t
+            cz = z1 + (z2 - z1) * t
+            
+            ix, iz = self.world_to_grid((cx, cz), True)
+            
+            if 0 <= ix < self.width and 0 <= iz < self.height:
+                if (ix == target_ix and iz == target_iz) or (ix == int(x1) and iz == int(z1)):
+                    continue
+                    
+                curr_y = self.y.get((ix, iz), 0)
+                
+                if curr_y >= max_allowed_y and target_grid_y < curr_y:
+                    return False
+                    
+        return True
+
     def set_obstacles(self, obs_list: Iterable[ObstacleRect]):
         """
         서버 호출:
@@ -854,6 +936,8 @@ class DStarPlanner:
         self.obstacle_rectangles = list(obs_list)
         new_obstacles = set()
 
+        # TODO
+        # obs.type에 따른 로직이 이부분에 들어가야 한다.
         for obs in self.obstacle_rectangles:
             x_min = math.floor(obs.x_min - self.obstacle_margin)
             x_max = math.ceil(obs.x_max + self.obstacle_margin)
