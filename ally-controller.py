@@ -93,34 +93,157 @@ combined_commands = [
     }
 ]
 
-
-@app.route('/detect', methods=['POST'])
+@app.route("/detect", methods=["POST"])
 def detect():
-    image = request.files.get('image')
-    if not image:
-        return jsonify({"error": "No image received"}), 400
 
-    image_path = 'temp_image.jpg'
-    image.save(image_path)
+    image_file = request.files.get("image")
 
-    results = model(image_path)
-    detections = results[0].boxes.data.cpu().numpy()
-    print(results[0].boxes.data)
-    target_classes = {0: "tank",1: "rock", 2: "car", 7: "truck", 15: "rock"}
-    filtered_results = []
-    for box in detections:
-        class_id = int(box[5])
-        if class_id in target_classes:
-            filtered_results.append({
-                'className': target_classes[class_id],
-                'bbox': [float(coord) for coord in box[:4]],
-                'confidence': float(box[4]),
-                'color': '#00FF00',
-                'filled': False,
-                'updateBoxWhileMoving': False
-            })
+    if image_file is None:
+        return jsonify({
+            "error": "No image received"
+        }), 400
 
-    return jsonify(filtered_results)
+    try:
+        image_bytes = image_file.read()
+
+        if not image_bytes:
+            return jsonify({
+                "error": "Empty image received"
+            }), 400
+
+        encoded_image = np.frombuffer(
+            image_bytes,
+            dtype=np.uint8
+        )
+
+        frame = cv2.imdecode(
+            encoded_image,
+            cv2.IMREAD_COLOR
+        )
+
+        if frame is None:
+            return jsonify({
+                "error": "Invalid image data"
+            }), 400
+
+
+        # ============================
+        # YOLO11s 객체 탐지
+        # ============================
+
+        result = model.predict(
+            source=frame,
+            imgsz=1280,
+            conf=0.15,
+            iou=0.45,
+            device=DEVICE,
+            verbose=False,
+            max_det=100
+        )[0]
+
+
+        detections = []
+
+
+        if result.boxes is not None:
+
+            for box in result.boxes:
+
+                class_id = int(
+                    box.cls[0]
+                    .cpu()
+                    .item()
+                )
+
+                class_name = model.names[
+                    class_id
+                ]
+
+                confidence = float(
+                    box.conf[0]
+                    .cpu()
+                    .item()
+                )
+
+                x1, y1, x2, y2 = (
+                    box.xyxy[0]
+                    .cpu()
+                    .tolist()
+                )
+
+
+                center_x = (
+                    x1 + x2
+                ) / 2
+
+                center_y = (
+                    y1 + y2
+                ) / 2
+
+
+                detection = {
+
+                    "className": class_name,
+
+                    "classId": class_id,
+
+                    "bbox": [
+                        float(x1),
+                        float(y1),
+                        float(x2),
+                        float(y2)
+                    ],
+
+                    "confidence": confidence,
+
+                    "center": [
+                        float(center_x),
+                        float(center_y)
+                    ],
+
+                    "color": "#00FF00",
+
+                    "filled": False,
+
+                    "updateBoxWhileMoving": False
+                }
+
+
+                detections.append(
+                    detection
+                )
+
+
+        print(
+            f"Detection count: "
+            f"{len(detections)}"
+        )
+
+        for d in detections:
+            print(
+                d["className"],
+                round(
+                    d["confidence"],
+                    3
+                )
+            )
+
+
+        return jsonify(
+            detections
+        )
+
+
+    except Exception as e:
+
+        print(
+            "Detection Error:",
+            e
+        )
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 @app.route('/stereo_image', methods=['POST'])
 def stereo_image():
