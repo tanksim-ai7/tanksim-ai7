@@ -25,6 +25,7 @@ import math
 
 # /info 위치 변화량으로 속도를 계산할 때 실제 시간 간격 dt가 필요하다.
 import time
+import threading
 
 
 # ============================================================
@@ -1798,3 +1799,207 @@ def reset_all_controller_state():
 
     # /info 기반 속도 추정 상태 초기화.
     reset_speed_state()
+
+# ============================================================
+# 15. 서버용 상위 주행 제어 클래스
+# ============================================================
+
+class TankDriveController:
+    """
+    Flask 서버에서 주행 관련 상태/분기문을 제거하기 위한 facade 클래스.
+
+    서버는 다음 메서드만 호출하면 된다.
+        handle_info(data)
+        get_action(data)
+        handle_set_destination(data)
+        handle_update_obstacles(data)
+        initialize(start_position)
+
+    내부에서는 기존 PID 함수와 D* Lite/Risk planner를 그대로 재사용한다.
+    """
+
+    def __init__(self, path_planner, save_path="terrain_map"):
+        self.path_planner = path_planner
+        self.save_path = save_path
+        self.planner_lock = threading.RLock()
+
+        self.path = []
+        self.destination = None          # (x, y, z)
+        self.all_info = {}
+        self.initialized = False
+
+    @staticmethod
+    def _stop_response():
+        return make_stop_command()
+
+    @staticmethod
+    def _extract_xz_from_action(data):
+        position = (data or {}).get("position", {})
+        return [
+            float(position.get("x", 0.0)),
+            float(position.get("z", 0.0)),
+        ]
+
+    def _current_info_position(self):
+        player_pos = (self.all_info or {}).get("playerPos", {})
+        x = player_pos.get("x")
+        z = player_pos.get("z")
+        if x is None or z is None:
+            return None
+        return [float(x), float(z)]
+
+    def _destination_xz(self):
+        if self.destination is None:
+            return None
+        return (float(self.destination[0]), float(self.destination[2]))
+
+    def _replan(self, current_position, force=False):
+        destination_xz = self._destination_xz()
+        if destination_xz is None or current_position is None:
+            return self.path
+
+        with self.planner_lock:
+            new_path = self.path_planner.replan_if_needed(
+                current_position,
+                destination_xz,
+                save_path=self.save_path,
+                force=force,
+            )
+
+        if new_path is not None:
+            self.path = new_path
+        return self.path
+
+    def handle_info(self, data):
+        """/info의 상태 저장 + 속도 갱신 + 응답 생성을 모두 처리한다."""
+        if not data:
+            return {"error": "No JSON received"}, 400
+
+        self.all_info = data
+        player_pos = data.get("playerPos", {})
+        x = player_pos.get("x")
+        z = player_pos.get("z")
+
+        if x is not None and z is not None:
+            update_info_speed(data, [x, z])
+
+        return {"status": "success", "control": ""}, 200
+
+    def handle_set_destination(self, data):
+        """/set_destination의 검증, 파싱, 내부 상태 초기화를 처리한다."""
+        if not data or "destination" not in data:
+            return {"status": "ERROR", "message": "Missing destination data"}, 400
+
+        try:
+            x, y, z = map(float, data["destination"].split(","))
+        except (TypeError, ValueError) as e:
+            return {"status": "ERROR", "message": f"Invalid format: {e}"}, 400
+
+        self.destination = (x, y, z)
+        check_destination_change((x, z))
+
+        # 이미 episode가 시작된 상태라면 새 목적지로 즉시 재계획한다.
+        current_position = self._current_info_position()
+        if self.initialized and current_position is not None:
+            self._replan(current_position, force=True)
+
+        return {
+            "status": "OK",
+            "destination": {"x": x, "y": y, "z": z},
+        }, 200
+
+    def handle_update_obstacles(self, data):
+        """/update_obstacle의 검증, obstacle 반영, 필요 시 강제 재계획을 처리한다."""
+        if not data:
+            return {"status": "error", "message": "No data received"}, 400
+
+        with self.planner_lock:
+            self.path_planner.update_dstar_obstacles_from_payload(data)
+
+        if self.initialized:
+            self._replan(self._current_info_position(), force=True)
+
+        return {"status": "success", "message": "Obstacle data received"}, 200
+
+    def initialize(self, start_position=(60.0, 27.23), load_risk_layers=True):
+        """episode 시작 시 planner/PID 상태와 최초 경로를 초기화한다."""
+        reset_all_controller_state()
+
+        with self.planner_lock:
+            if load_risk_layers and hasattr(self.path_planner, "set_risk_layers"):
+                self.path_planner.set_risk_layers()
+            self.path_planner.reset_replan_tracking()
+
+        self.initialized = True
+        self.path = []
+        self._replan(start_position, force=True)
+        return self.path
+
+    def get_action(self, data):
+        """
+        /get_action의 전체 주행 판단을 수행한다.
+
+        Flask 서버는 request JSON을 그대로 넘기고 반환 dict를 jsonify 하면 된다.
+        """
+        current_position = self._extract_xz_from_action(data)
+        self._replan(current_position)
+
+        destination_xz = self._destination_xz()
+        if destination_xz is None or not self.path:
+            return self._stop_response()
+
+        current_speed_kmh = read_player_speed_kmh()
+        body_yaw_deg = read_player_body_yaw_deg(self.all_info or {})
+        if current_speed_kmh is None or body_yaw_deg is None:
+            return self._stop_response()
+
+        check_destination_change(destination_xz)
+        now, dt = get_control_dt()
+
+        distance_to_goal = math.hypot(
+            destination_xz[0] - current_position[0],
+            destination_xz[1] - current_position[1],
+        )
+
+        arrival_command = update_arrival_state(
+            distance_to_goal=distance_to_goal,
+            current_speed_kmh=current_speed_kmh,
+            now=now,
+        )
+        if arrival_command is not None:
+            return arrival_command
+
+        steering_command, steering_info = calculate_steering_command(
+            current_position=current_position,
+            body_yaw_deg=body_yaw_deg,
+            path=self.path,
+            current_speed_kmh=current_speed_kmh,
+            dt=dt,
+        )
+        if steering_info is None:
+            return self._stop_response()
+
+        upcoming_corner = find_upcoming_corner(
+            path=self.path,
+            current_position=current_position,
+        )
+        corner_speed_limit_kmh = calculate_corner_speed_limit(upcoming_corner)
+        destination_speed_limit_kmh = calculate_target_speed_kmh(distance_to_goal)
+        target_speed_kmh = min(
+            destination_speed_limit_kmh,
+            corner_speed_limit_kmh,
+        )
+
+        pid_output = speed_pid.update(
+            target_speed_kmh - current_speed_kmh,
+            dt,
+        )
+        command = make_longitudinal_command(pid_output)
+        command = apply_alignment_speed_limit(
+            command=command,
+            heading_error_deg=steering_info["heading_error_deg"],
+            current_speed_kmh=current_speed_kmh,
+        )
+        command["moveAD"] = steering_command
+        return command
+
