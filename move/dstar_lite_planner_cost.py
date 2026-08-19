@@ -15,7 +15,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
 
 GridNode = Tuple[int, int]
-ThreeNode = Tuple[int, int, int]
 WorldPoint = Tuple[float, float]
 INF = float("inf")
 
@@ -48,13 +47,13 @@ class ObstacleRect:
     @classmethod
     def from_min_max(cls, x_min, x_max, z_min, z_max):
 
-        # 모든 좌표가 ±0.1 오차 범위 안에 있는지 검사하는 보조 함수
+        # 모든 좌표가 ±0.2 오차 범위 안에 있는지 검사하는 보조 함수
         def _is_match(target_list):
             for tx_min, tx_max, tz_min, tz_max in target_list:
-                if (abs(tx_min - x_min) <= 0.1 and 
-                    abs(tx_max - x_max) <= 0.1 and 
-                    abs(tz_min - z_min) <= 0.1 and 
-                    abs(tz_max - z_max) <= 0.1):
+                if (abs(tx_min - x_min) <= 0.2 and 
+                    abs(tx_max - x_max) <= 0.2 and 
+                    abs(tz_min - z_min) <= 0.2 and 
+                    abs(tz_max - z_max) <= 0.2):
                     return True
             return False
         
@@ -132,7 +131,7 @@ class DStarPlanner:
 
         # y축 추가
         self.y: Dict[GridNode, float] = {}
-        self.updated_y: List[ThreeNode] = [] # 자연물에 의해 고도가 업데이트 된 좌표를 위한 공간
+        self.updated_y: List[GridNode] = [] # 자연물에 의해 고도가 업데이트 된 좌표를 위한 공간
 
         self.g: Dict[GridNode, float] = {}
         self.rhs: Dict[GridNode, float] = {self.goal: 0.0}
@@ -911,11 +910,22 @@ class DStarPlanner:
             대충 사이즈로 판단하자 -> max-min >= 3.5 면 Rock으로 판단하고 진행하자
         """
 
-        # TODO
         # 오브젝트가 제거된 경우 업데이트 했던 add_num만큼 다시 빼줘야 한다.
+        # 쉽게 고도정보 초기화로 가자
+        loaded_data = np.load('move/risk_layers.npz')
+        loaded_data = loaded_data['height']
+        loaded_data = np.flipud(loaded_data)
+        loaded_data = np.rot90(loaded_data, k=-1)
+        self.update_entire_heightmap(loaded_data)
+        self.updated_y = []
 
-        for obs in self.obstacle_rectangles:
+        for obs in self.obstacle_rectangles: # Tree
             if obs.type == 'nature':
+                if max((obs.x_max-obs.x_min), (obs.z_max-obs.z_min)) >= 3.5:
+                    continue
+
+                add_num = 5
+
                 x_min = math.floor(obs.x_min)
                 x_max = math.ceil(obs.x_max)
                 z_min = math.floor(obs.z_min)
@@ -926,21 +936,38 @@ class DStarPlanner:
                 z_min = max(0, z_min)
                 z_max = min(self.height - 1, z_max)
 
-                add_num = 0
-                if max((obs.x_max-obs.x_min), (obs.z_max-obs.z_min)) >= 3.5:
-                    # ROCK의 경우 +2
-                    add_num = 2
-                else:
-                    # Tree의 경우 +5
-                    add_num = 5
-
+                # 일단 무조건 insert
                 for x in range(x_min, x_max + 1):
                     for z in range(z_min, z_max + 1):
-                        if any(item[0] == x and item[1] == z for item in self.updated_y):
+                        self.y[(x, z)] = float(self.y.get((x, z), 0)+add_num)
+                        self.updated_y.append((x,z))
+
+        for obs in self.obstacle_rectangles: # Rock
+            if obs.type == 'nature':
+                if max((obs.x_max-obs.x_min), (obs.z_max-obs.z_min)) < 3.5:
+                    continue
+
+                add_num = 2
+                
+                x_min = math.floor(obs.x_min)
+                x_max = math.ceil(obs.x_max)
+                z_min = math.floor(obs.z_min)
+                z_max = math.ceil(obs.z_max)
+    
+                x_min = max(0, x_min)
+                x_max = min(self.width - 1, x_max)
+                z_min = max(0, z_min)
+                z_max = min(self.height - 1, z_max)
+
+                # tree에 대한 고도가 더 높게 더해지기 때문에 
+                # if (x, z) in self.updated_y로 확인하여 insert
+                for x in range(x_min, x_max + 1):
+                    for z in range(z_min, z_max + 1):
+                        if (x, z) in self.updated_y:
                             continue
 
                         self.y[(x, z)] = float(self.y.get((x, z), 0)+add_num)
-                        self.updated_y.append((x,z,add_num))
+                        self.updated_y.append((x,z))
 
     def update_obstacles_type(self, target_list:List[Tuple[float, float, float, str]]):
         """
@@ -1064,6 +1091,8 @@ class DStarPlanner:
         """
         self.obstacle_rectangles = list(obs_list)
         new_obstacles = set()
+
+        self.update_y_from_nature() # 자연물에 의한 고도 정보 업데이트
 
         # TODO
         # obs.type에 따른 로직이 이부분에 들어가야 한다.

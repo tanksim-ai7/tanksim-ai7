@@ -424,6 +424,32 @@ class RiskDStarPlanner(DStarPlanner):
             )
             ax.add_patch(patch)
 
+            color = '#228B22'
+            for obs in self.obstacle_rectangles:
+                if obs.type == 'nature':
+                    color = '#228B22'
+                elif obs.type == 'unknown':
+                    color = '#000000'
+                elif obs.type == 'enemy_tank':
+                    color = '#800020'
+                elif obs.type == 'enemy':
+                    color = '#FF8C00'
+                elif obs.type == 'team':
+                    color = '#8A2BE2'
+                elif obs.type == 'team_tank':
+                    color = '#000080'
+
+                patch = Rectangle(
+                    (
+                        obs.x_min - self.obstacle_margin,
+                        obs.z_min - self.obstacle_margin,
+                    ),
+                    (obs.x_max - obs.x_min) + 2 * self.obstacle_margin,
+                    (obs.z_max - obs.z_min) + 2 * self.obstacle_margin,
+                    facecolor=color, 
+                )
+                ax.add_patch(patch)
+
         if active_path:
             px = [point[0] for point in active_path]
             pz = [point[1] for point in active_path]
