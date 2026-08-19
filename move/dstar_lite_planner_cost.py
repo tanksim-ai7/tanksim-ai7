@@ -15,6 +15,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
 
 GridNode = Tuple[int, int]
+ThreeNode = Tuple[int, int, int]
 WorldPoint = Tuple[float, float]
 INF = float("inf")
 
@@ -46,17 +47,29 @@ class ObstacleRect:
 
     @classmethod
     def from_min_max(cls, x_min, x_max, z_min, z_max):
+
+        # 모든 좌표가 ±0.1 오차 범위 안에 있는지 검사하는 보조 함수
+        def _is_match(target_list):
+            for tx_min, tx_max, tz_min, tz_max in target_list:
+                if (abs(tx_min - x_min) <= 0.1 and 
+                    abs(tx_max - x_max) <= 0.1 and 
+                    abs(tz_min - z_min) <= 0.1 and 
+                    abs(tz_max - z_max) <= 0.1):
+                    return True
+            return False
+        
         type = 'nature'
-        if (x_min, x_max, z_min, z_max) in unknown_list :
+        if _is_match(unknown_list):
             type = 'unknown'
-        elif (x_min, x_max, z_min, z_max) in enemy_list :
+        elif _is_match(enemy_list):
             type = 'enemy'
-        elif (x_min, x_max, z_min, z_max) in team_list :
+        elif _is_match(team_list):
             type = 'team'
-        elif (x_min, x_max, z_min, z_max) in enemy_tank_list :
+        elif _is_match(enemy_tank_list):
             type = 'enemy_tank'
-        elif (x_min, x_max, z_min, z_max) in team_tank_list :
+        elif _is_match(team_tank_list):
             type = 'team_tank'
+
 
         return cls(
             x_min=min(float(x_min), float(x_max)),
@@ -119,7 +132,7 @@ class DStarPlanner:
 
         # y축 추가
         self.y: Dict[GridNode, float] = {}
-        self.high: Set[GridNode] = set() # 특정 고도를 막기 위한 변수
+        self.updated_y: List[ThreeNode] = [] # 자연물에 의해 고도가 업데이트 된 좌표를 위한 공간
 
         self.g: Dict[GridNode, float] = {}
         self.rhs: Dict[GridNode, float] = {self.goal: 0.0}
@@ -879,10 +892,6 @@ class DStarPlanner:
         for ix in range(self.width):
             for iz in range(self.height):
                 self.y[(ix,iz)] = float(height_flat[idx])
-
-                if float(height_flat[idx]) >= 13.0:
-                    self.high.add((ix,iz))
-
                 idx += 1
                 
         print(f"총 {idx}개 노드의 고도 데이터가 넘파이 배열로부터 일괄 주입되었습니다.")
@@ -891,13 +900,125 @@ class DStarPlanner:
     # 장애물
     # --------------------------------------------------
 
-    # 현재 미사용
-    def _is_visible_under_height(self, p1: Tuple[float, float], p2: Tuple[float, float], max_allowed_y: float) -> bool:
+    def update_y_from_nature(self):
+        """
+            자연물이 배치된 좌표에 고도를 업데이트 해준다.
+            
+            self.updated_y = List:[Tuple:(int, int, int)] (x, z, add_num)
+            (자연물에 의해 고도가 업데이트 된 좌표를 위한 공간)
+
+            나무와 바위에 대한 type 구분이 필요
+            대충 사이즈로 판단하자 -> max-min >= 3.5 면 Rock으로 판단하고 진행하자
+        """
+
+        # TODO
+        # 오브젝트가 제거된 경우 업데이트 했던 add_num만큼 다시 빼줘야 한다.
+
+        for obs in self.obstacle_rectangles:
+            if obs.type == 'nature':
+                x_min = math.floor(obs.x_min)
+                x_max = math.ceil(obs.x_max)
+                z_min = math.floor(obs.z_min)
+                z_max = math.ceil(obs.z_max)
+    
+                x_min = max(0, x_min)
+                x_max = min(self.width - 1, x_max)
+                z_min = max(0, z_min)
+                z_max = min(self.height - 1, z_max)
+
+                add_num = 0
+                if max((obs.x_max-obs.x_min), (obs.z_max-obs.z_min)) >= 3.5:
+                    # ROCK의 경우 +2
+                    add_num = 2
+                else:
+                    # Tree의 경우 +5
+                    add_num = 5
+
+                for x in range(x_min, x_max + 1):
+                    for z in range(z_min, z_max + 1):
+                        if any(item[0] == x and item[1] == z for item in self.updated_y):
+                            continue
+
+                        self.y[(x, z)] = float(self.y.get((x, z), 0)+add_num)
+                        self.updated_y.append((x,z,add_num))
+
+    def update_obstacles_type(self, target_list:List[Tuple[float, float, float, str]]):
+        """
+            오브젝트 타입 업데이트 (detect된 오브젝트들에 대해서 type update)
+            target_list = [(x, y, z, name), ...]
+
+            main쪽에서 특정 전역 변수(tmp_list(임시))에 값이 채워지면
+            get_action에서 움직임을 멈추고
+            DStarPlanner.update_obstacles_type(tmp_list) 하여 경로 update & tmp_list = []로 초기화 후 진행
+        """
+
+        chg_list = [] # 바뀐 리스트
+        for x, y, z, name in target_list:
+            # nx, nz = self.world_to_grid((x, z), True) # 서버의 [x, z] 좌표를 Grid (x, z)로 변환. (굳이 필요한 작업인가?)
+
+            for idx in range(len(self.obstacle_rectangles)):
+                x_min = max(self.obstacle_rectangles[idx].x_min, 0)
+                x_max = min(self.obstacle_rectangles[idx].x_max, self.width)
+                z_min = max(self.obstacle_rectangles[idx].z_min, 0)
+                z_max = min(self.obstacle_rectangles[idx].z_max, self.height)
+
+                # obstacle의 min/max 값 범위에 x,z 모두 포함된다. & type == 'nature'일 때
+                if x_min <= x <= x_max and z_min <= z <= z_max and self.obstacle_rectangles[idx].type != 'nature':
+                    type_name = 'unknown' # 일단 아래 오브젝트를 제외한 모든 것들은 unknown으로 빠진다.
+                    if name == 'Human1' or name == 'Human2':
+                        if self.obstacle_rectangles[idx].type == 'enemy': # 이미 같은 타입으로 특정된 오브젝트면 continue
+                            continue
+                        type_name = 'enemy'
+                    elif name == 'Tank1':
+                        if self.obstacle_rectangles[idx].type == 'enemy_tank':
+                            continue
+                        type_name = 'enemy_tank'
+                    elif name == 'Human3':
+                        if self.obstacle_rectangles[idx].type == 'team':
+                            continue
+                        type_name = 'team'
+                    elif name == 'Tank2':
+                        if self.obstacle_rectangles[idx].type == 'team_tank':
+                            continue
+                        type_name = 'team_tank'
+
+                    if type_name != 'unknown':
+                        chg_list.append((self.obstacle_rectangles[idx].x_min, self.obstacle_rectangles[idx].x_max, self.obstacle_rectangles[idx].z_min, self.obstacle_rectangles[idx].z_max, type_name))
+
+                    break # break를 해야하나? (좌표가 겹친다면? break 걸지 말고 다 append 쳐줘야 하는가?)
+
+        # 반복문 완료 후 chg_list의 값을 통해 전역변수 업데이트
+        
+        # 먼저 chg_list의 모든 요소를 전역변수에서 제거해준다.
+        chg_set = {dt[:4] for dt in chg_list}
+        unknown_list = [dt for dt in unknown_list if dt not in chg_set]
+        enemy_list = [dt for dt in enemy_list if dt not in chg_set]
+        enemy_tank_list = [dt for dt in enemy_tank_list if dt not in chg_set]
+        team_list = [dt for dt in team_list if dt not in chg_set]
+        team_tank_list = [dt for dt in team_tank_list if dt not in chg_set]
+
+        # 다시 chg_list의 모든 요소들을 type에 맞게 전역변수에 넣어준다.
+        for dt in chg_list:
+            if dt[4] == 'enemy':
+                enemy_list.append(dt[:4])
+            elif dt[4] == 'enemy_tank':
+                enemy_tank_list.append(dt[:4])
+            elif dt[4] == 'team':
+                team_list.append(dt[:4])
+            elif dt[4] == 'team_tank':
+                team_tank_list.append(dt[:4])
+        
+        # obstacle type update (전역변수를 통해 type이 업데이트 된다.)
+        self.update_dstar_obstacles_from_payload(self.obstacle_rectangles)
+
+
+    def _is_visible_under_height(self, p1: Tuple[float, float], p2: Tuple[float, float], max_allowed_y: float, num: int) -> bool:
         """
         적에 대해서 기존 고도에 따른 이동 가능/불가능한 영역 설정을 위한 함수
         p1: 적 탱크의 중심 좌표(min, max 값의 중간값)
         p2: 반복문으로 계속 받아오는 값으로(범위를 의미) min~max까지의 좌표값
-        max_allowed_y: min~max안의 모든 좌표에서 가장 높은 고도 값 +3
+        max_allowed_y: min~max안의 중심 좌표에 대한 고도 값
+        num: +해줄 상수
         """
         x1, z1 = p1
         x2, z2 = p2
@@ -922,12 +1043,20 @@ class DStarPlanner:
                     continue
                     
                 curr_y = self.y.get((ix, iz), 0)
-                
-                if curr_y >= max_allowed_y and target_grid_y < curr_y:
-                    return False
+
+                # 고도에 따른 시야에 대한 부분
+                # max_allowed_y: 오브젝트의 센터에 대한 고도값
+                # target_grid_y: 오브젝트의 범위 만큼 반복하는 (x,z)에 대한 고도값
+                # curr_y: 오브젝트와 반복문의 좌표를 이은 선에 대해 중간에 존재하는 고도값
+                if curr_y >= (max_allowed_y+num): # 중간에 존재하는 고도값이 오브젝트가 존재하는 고도값 + num 보다 높다면
+                    if (target_grid_y+num-1) <= curr_y:
+                        return False
+                    if target_grid_y <= (curr_y+0.5) and math.hypot(x2 - ix, z2 - iz) >= 6:
+                        # 중간의 고도가 target(x,z)의 고도보다 살짝 낮아도 거리 차이가 6이상이라면 지나갈 수 있도록
+                        return False
                     
         return True
-
+    
     def set_obstacles(self, obs_list: Iterable[ObstacleRect]):
         """
         서버 호출:
@@ -944,14 +1073,70 @@ class DStarPlanner:
             z_min = math.floor(obs.z_min - self.obstacle_margin)
             z_max = math.ceil(obs.z_max + self.obstacle_margin)
 
+            add_num = 0 # 오브젝트 범위에 대한 설정
+            if obs.type == 'enemy':
+                add_num = 25 # 일단 단순히 오브젝트에 대한 범위를 +-25
+            elif obs.type == 'enemy_tank':
+                add_num = 49 # 일단 단순히 오브젝트에 대한 범위를 +-49
+            elif obs.type == 'team':
+                pass
+            elif obs.type == 'team_tank':
+                pass
+
             x_min = max(0, x_min)
             x_max = min(self.width - 1, x_max)
             z_min = max(0, z_min)
             z_max = min(self.height - 1, z_max)
 
-            for x in range(x_min, x_max + 1):
-                for z in range(z_min, z_max + 1):
-                    new_obstacles.add((x, z))
+            # 타입에 따른 로직에 대한 설정
+            if obs.type == 'enemy': 
+                # target_y = max(self.y[(x, z)] for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1))
+
+                cx = int((x_min + x_max) / 2)
+                cz = int((z_min + z_max) / 2)
+                target_y = self.y.get((cx, cz), 0) # 중심 좌표에 대한 고도
+
+                tmp_x_min = max(0, x_min-add_num)
+                tmp_x_max = min(self.width - 1, x_max+add_num)
+                tmp_z_min = max(0, z_min-add_num)
+                tmp_z_max = min(self.height - 1, z_max+add_num)
+                for x in range(tmp_x_min, tmp_x_max + 1):
+                    for z in range(tmp_z_min, tmp_z_max + 1):
+                        # 기본 enemy 사이즈만큼은 무조건 add
+                        if x_min <= x <= x_max and z_min <= z <= z_max:
+                            new_obstacles.add((x, z))
+                            continue
+
+                        if self._is_visible_under_height((cx, cz), (x, z), target_y, 2):
+                            new_obstacles.add((x, z))
+            elif obs.type == 'enemy_tank':
+                # target_y = max(self.y[(x, z)] for x in range(x_min, x_max + 1) for z in range(z_min, z_max + 1))
+                
+                cx = int((x_min + x_max) / 2)
+                cz = int((z_min + z_max) / 2)
+                target_y = self.y.get((cx, cz), 0) # 중심 좌표에 대한 고도
+
+                tmp_x_min = max(0, x_min-add_num)
+                tmp_x_max = min(self.width - 1, x_max+add_num)
+                tmp_z_min = max(0, z_min-add_num)
+                tmp_z_max = min(self.height - 1, z_max+add_num)
+                for x in range(tmp_x_min, tmp_x_max + 1):
+                    for z in range(tmp_z_min, tmp_z_max + 1):
+                        # 기본 enemy 사이즈만큼은 무조건 add
+                        if x_min <= x <= x_max and z_min <= z <= z_max:
+                            new_obstacles.add((x, z))
+                            continue
+
+                        if self._is_visible_under_height((cx, cz), (x, z), target_y, 3):
+                            new_obstacles.add((x, z))
+            # elif obs.type == 'team':
+            #     pass
+            # elif obs.type == 'team_tank':
+            #     pass
+            else:
+                for x in range(x_min, x_max + 1):
+                    for z in range(z_min, z_max + 1):
+                        new_obstacles.add((x, z))
 
         changed_cells = self.obstacles.symmetric_difference(new_obstacles)
         affected_nodes = set(changed_cells)
