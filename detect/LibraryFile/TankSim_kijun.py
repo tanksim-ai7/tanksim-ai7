@@ -1,4 +1,4 @@
-import TankSim as ts
+import detect.LibraryFile.TankSim as ts
 
 VERTICAL_FOV = 28.0  # deg, 기존과 동일 가정
 HORIZONTAL_FOV_STEREO = 47.81061

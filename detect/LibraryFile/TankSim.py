@@ -2,7 +2,6 @@
 from flask import Flask, request, jsonify
 from ultralytics import YOLO
 from pathlib import Path
-from astar_planner import AStarPlanner, ObstacleRect
 
 import os
 import torch

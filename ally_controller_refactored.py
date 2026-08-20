@@ -3,6 +3,8 @@ from ultralytics import YOLO
 from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 from move.pid_controller import TankDriveController
 import matplotlib
+from fire_module import FireModule
+import math
 
 matplotlib.use("Agg")
 
@@ -10,6 +12,8 @@ app = Flask(__name__)
 model = YOLO('yolov8n.pt')
 print(model.names)
 
+all_info = None
+fm = FireModule()
 path_planner = DStarLitePlanner()
 drive_controller = TankDriveController(path_planner)
 
@@ -62,12 +66,43 @@ def stereo_image():
     
 @app.route('/info', methods=['POST'])
 def info():
+    global all_info
+    all_info = request.get_json(force=True)
     response, status = drive_controller.handle_info(request.get_json(force=True))
+    fm.on_info(request.get_json(force=True))
     return jsonify(response), status
 
 @app.route('/get_action', methods=['POST'])
 def get_action():
-    return jsonify(drive_controller.get_action(request.get_json(force=True)))
+    rst_cmd = drive_controller.get_action(request.get_json(force=True))
+
+    # TODO 
+    body_rate = abs(rst_cmd["moveAD"]["weight"]*all_info.get("playerBodyX", 0))
+    my_speed = all_info.get("playerSpeed", 0)
+
+    angle_deg = all_info.get("playerBodyX", 0)
+    angle_rad = math.radians(angle_deg)
+
+    vx = my_speed * math.sin(angle_rad)
+    vz = my_speed * math.cos(angle_rad)
+
+    my_vel = (vx, 0.0, vz)
+
+    """
+        my_vel        경로팀 이동에 따른 자기 속도 벡터 [m/s]
+        body_rate_dps 경로팀 선회에 따른 차체 각속도 [deg/s]
+        hull_settled  차체 정지 여부. None 이면 속도로 자동 판정
+    """
+    turret_cmd = fm.get_turret_command(
+        my_vel=my_vel,        # 경로팀이 내는 이동에 따른 속도
+        body_rate_dps=body_rate,     # 경로팀이 내는 차체 선회 각속도
+        hull_settled=(my_speed < 0.3 and body_rate < 1e-6),
+    )
+    rst_cmd["turretQE"] = turret_cmd["turretQE"]
+    rst_cmd["turretRF"] = turret_cmd["turretRF"]
+    rst_cmd["fire"] = turret_cmd["fire"]
+
+    return jsonify(rst_cmd)
 
 @app.route('/update_bullet', methods=['POST'])
 def update_bullet():
@@ -75,6 +110,8 @@ def update_bullet():
     if not data:
         return jsonify({"status": "ERROR", "message": "Invalid request data"}), 400
 
+    fm.on_impact(data)
+    
     print(f"💥 Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={data.get('hit')}")
     return jsonify({"status": "OK", "message": "Bullet impact data received"})
 

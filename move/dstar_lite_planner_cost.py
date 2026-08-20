@@ -1359,12 +1359,37 @@ class DStarPlanner:
             zorder=1,
         )
 
-        for obs in obstacle_rectangles:
+        for x,z in self.obstacles:
             patch = Rectangle(
-                (obs.x_min - obstacle_margin, obs.z_min - obstacle_margin),
-                (obs.x_max - obs.x_min) + 2 * obstacle_margin,
-                (obs.z_max - obs.z_min) + 2 * obstacle_margin,
+                ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
+                1.0, 1.0,
                 alpha=0.5,
+            )
+            ax.add_patch(patch)
+
+        color = '#228B22'
+        for obs in obstacle_rectangles:
+            if obs.type == 'nature':
+                color = '#228B22'
+            elif obs.type == 'unknown':
+                color = '#000000'
+            elif obs.type == 'enemy_tank':
+                color = '#800020'
+            elif obs.type == 'enemy':
+                color = '#FF8C00'
+            elif obs.type == 'team':
+                color = '#8A2BE2'
+            elif obs.type == 'team_tank':
+                color = '#000080'
+
+            patch = Rectangle(
+                (
+                    obs.x_min - self.obstacle_margin,
+                    obs.z_min - self.obstacle_margin,
+                ),
+                (obs.x_max - obs.x_min) + 2 * self.obstacle_margin,
+                (obs.z_max - obs.z_min) + 2 * self.obstacle_margin,
+                facecolor=color, 
             )
             ax.add_patch(patch)
 

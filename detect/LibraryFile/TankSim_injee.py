@@ -1,14 +1,4 @@
-import TankSim as ts
-
-planner = ts.AStarPlanner(
-    grid_min_x=0.0,
-    grid_max_x=300.0,
-    grid_min_z=0.0,
-    grid_max_z=300.0,
-    cell_size=1.0,
-    obstacle_margin=2.0,
-    allow_diagonal=True,
-)
+import detect.LibraryFile.TankSim as ts
 
     # 1) /update_obstacle 에서 호출
 def update_obstacles_from_payload(payload: dict):

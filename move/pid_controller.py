@@ -26,6 +26,7 @@ import math
 # /info 위치 변화량으로 속도를 계산할 때 실제 시간 간격 dt가 필요하다.
 import time
 import threading
+from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 
 
 # ============================================================
@@ -1818,7 +1819,7 @@ class TankDriveController:
     내부에서는 기존 PID 함수와 D* Lite/Risk planner를 그대로 재사용한다.
     """
 
-    def __init__(self, path_planner, save_path="terrain_map"):
+    def __init__(self, path_planner: DStarLitePlanner, save_path="terrain_map"):
         self.path_planner = path_planner
         self.save_path = save_path
         self.planner_lock = threading.RLock()
