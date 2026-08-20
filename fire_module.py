@@ -56,13 +56,28 @@ Vec3 = Tuple[float, float, float]
 # ══════════════════════════════════════════════════════════
 # 설정
 # ══════════════════════════════════════════════════════════
+# auto_aim_bot_v6.py 의 CFG 에서 사격 관련 값을 그대로 옮긴 것.
+# 이 값들은 팀원이 실사격으로 튜닝한 결과이므로 임의로 바꾸지 말 것.
 CFG = {
-    "reload_s": 6.9,          # 재장전 [s]
-    "moving_fire": True,      # 차체 이동 중 사격 허용
-    "use_bias": True,         # 착탄 되먹임 보정 사용
-    "p_hit_min": 0.0,         # 0 이면 확률 게이트 미사용
-    "halt_speed": 0.30,       # 이 속도 이하를 정지로 본다 [m/s]
+    "reload_s": 6.6,           # 재장전 [s]
+    "moving_fire": True,       # 차체 이동 중 사격 허용
+    "use_bias": True,          # 착탄 되먹임 보정 사용
+    "halt_speed": 0.30,        # 이 속도 이하를 정지로 본다 [m/s]
     "min_target_speed": 0.40,  # 이보다 빠르면 표적 방위를 리드에 반영
+
+    # ── 사격 게이트 (여기가 명중률을 좌우한다) ──────────
+    "p_hit_min": 0.90,         # 명중확률이 이 미만이면 쏘지 않고 기다린다
+    "p_hit_floor": 0.28,       # patience 초과 시 낮추는 하한
+    "patience": 18.0,          # 좋은 기회를 이만큼 기다린 뒤 기준을 낮춘다 [s]
+    "tof_max": 0.50,           # 비행시간 상한 [s]. 초과하면 접근해서 쏜다
+                               #   0.5 s 는 대략 30 m 이내를 뜻한다.
+                               #   비행시간이 짧을수록 표적이 선회할 여유가 없다.
+    "body_rate_max": 15.0,     # 차체 각속도가 이보다 크면 사격 보류 [deg/s]
+    "settle_ticks": 0,         # 차체 정지 후 대기 틱 수
+    "db_safety": 0.5,          # 데드밴드 안전계수
+    "track_duty_max": 0.80,    # 포탑 각속도 중 추적에 쓸 최대 비율
+    "lon_gain": 0.8,           # 종방향 보정 게인
+    "lon_long_max": 7.0,       # 종방향 조준 이동 상한 [m]
 }
 
 
@@ -229,9 +244,19 @@ class FireModule:
             CFG.update(cfg)
         self.bal = Ballistics()
         self.bias = BiasEstimator()
-        self.fc = FireControl(self.bal, TurretParams(),
-                              target=TargetSize(), bias=self.bias,
-                              reload_s=CFG["reload_s"])
+        self.fc = FireControl(
+            self.bal, TurretParams(), reload_s=CFG["reload_s"],
+            target=TargetSize(), bias=self.bias,
+            p_hit_min=CFG["p_hit_min"],
+            settle_ticks=CFG["settle_ticks"],
+            db_safety=CFG["db_safety"],
+            track_duty_max=CFG["track_duty_max"],
+            patience=CFG["patience"],
+            p_hit_floor=CFG["p_hit_floor"],
+            lon_gain=CFG["lon_gain"],
+            tof_max=CFG["tof_max"],
+            lon_long_max=CFG["lon_long_max"],
+            body_rate_max=CFG["body_rate_max"])
         self.trk = TargetTracker(limits=MotionLimits())
         self.tm = Telemetry()
         self.log = ShotLog()
