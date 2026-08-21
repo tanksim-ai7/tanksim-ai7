@@ -1824,6 +1824,7 @@ class TankDriveController:
         self.save_path = save_path
         self.planner_lock = threading.RLock()
 
+        self.stop_flag = False
         self.path = []
         self.destination = None          # (x, y, z)
         self.all_info = {}
@@ -1887,6 +1888,9 @@ class TankDriveController:
         return {"status": "success", "control": ""}, 200
 
     def handle_set_destination(self, data):
+        self.save_path = []
+        self.stop_flag = True
+
         """/set_destination의 검증, 파싱, 내부 상태 초기화를 처리한다."""
         if not data or "destination" not in data:
             return {"status": "ERROR", "message": "Missing destination data"}, 400
@@ -1942,6 +1946,17 @@ class TankDriveController:
 
         Flask 서버는 request JSON을 그대로 넘기고 반환 dict를 jsonify 하면 된다.
         """
+
+        if self.stop_flag:
+            self.stop_flag = False
+            return {
+                "moveWS": {"command": "STOP", "weight": 0.0},
+                "moveAD": {"command": "", "weight": 0.0},
+                "turretQE": {"command": "", "weight": 0.0},
+                "turretRF": {"command": "", "weight": 0.0},
+                "fire": False
+            }
+        
         current_position = self._extract_xz_from_action(data)
         self._replan(current_position)
 
