@@ -1830,6 +1830,26 @@ class TankDriveController:
         self.all_info = {}
         self.initialized = False
 
+
+        # --------------------------------------------------------
+        # 자체 인지(우리 쪽 파이프라인) 기반 회피/후퇴용 상태
+        # --------------------------------------------------------
+        # vehicle_mode:
+        #   'advance' -> 평소 상태. get_action()이 매 tick 전진 재탐색을 돌린다.
+        #   'retreat' -> 후퇴 중. 전진 재탐색을 멈추고 retreat 경로를 그대로 따라간다.
+        #                목표(retreat 경로의 마지막 점)에 가까워지면 자동으로 'advance'로 복귀한다.
+        self.vehicle_mode = 'advance'
+
+        # 실제로 지나온 world 좌표 breadcrumb. 후퇴 경로의 재료가 된다.
+        # self.path는 항상 '미래로 갈 경로'만 들고 있어서 과거 이동 기록이
+        # 따로 없기 때문에 이 리스트를 새로 둔다.
+        self.position_history = []
+        self._history_min_step_m = 3.0    # 이 거리 이상 움직였을 때만 기록 (노이즈/중복 방지)
+        self._history_max_points = 300    # 무한정 쌓이지 않게 상한
+        self._retreat_distance_m = 15.0   # 한 번 후퇴할 때 되돌아갈 거리
+        self._retreat_arrival_tolerance_m = 3.0  # 후퇴 목표점에 이만큼 가까워지면 후퇴 종료
+
+
     @staticmethod
     def _stop_response():
         return make_stop_command()
@@ -1856,6 +1876,10 @@ class TankDriveController:
         return (float(self.destination[0]), float(self.destination[2]))
 
     def _replan(self, current_position, force=False):
+
+        if self.vehicle_mode == 'retreat' and not force:
+            return self.path
+
         destination_xz = self._destination_xz()
         if destination_xz is None or current_position is None:
             return self.path
@@ -1871,6 +1895,157 @@ class TankDriveController:
         if new_path is not None:
             self.path = new_path
         return self.path
+
+
+    # --------------------------------------------------------
+    # 자체 인지(우리 쪽 파이프라인) 기반 회피/후퇴
+    # --------------------------------------------------------
+
+    def _record_position_history(self, current_xz):
+        """get_action()이 매 tick 호출. 일정 거리 이상 움직였을 때만 breadcrumb을 남긴다."""
+        if current_xz is None:
+            return
+        if not self.position_history:
+            self.position_history.append(tuple(current_xz))
+            return
+        last = self.position_history[-1]
+        if math.hypot(current_xz[0] - last[0], current_xz[1] - last[1]) >= self._history_min_step_m:
+            self.position_history.append(tuple(current_xz))
+            if len(self.position_history) > self._history_max_points:
+                self.position_history.pop(0)
+
+    def _check_retreat_arrival(self, current_position):
+        """
+        후퇴 목표점(retreat 경로의 마지막 점)에 충분히 가까워졌는지 확인하고,
+        가까워졌으면 advance 모드로 복귀시켜 다음 재탐색부터 다시 목적지를
+        향해 전진하게 한다.
+        """
+        if self.vehicle_mode != 'retreat' or not self.path or current_position is None:
+            return
+
+        retreat_target = self.path[-1]
+        dist_to_retreat_target = math.hypot(
+            retreat_target[0] - current_position[0],
+            retreat_target[1] - current_position[1],
+        )
+        if dist_to_retreat_target <= self._retreat_arrival_tolerance_m:
+            self.vehicle_mode = 'advance'
+            with self.planner_lock:
+                self.path_planner.reset_replan_tracking()
+            self._replan(current_position, force=True)
+
+    def _build_retreat_path(self, retreat_distance_m=None):
+        """
+        position_history를 거꾸로 따라가는 후퇴 경로를 만든다.
+        이미 한 번 통과해서 안전이 검증된 구간이므로 D* Lite 재탐색 없이 바로 쓸 수
+        있지만, 그 사이 또 다른 오브젝트가 잡혔을 수 있으니 구간마다 다시 통행
+        가능 여부를 검사하며 안전한 만큼만 잘라서 반환한다.
+
+        planner_lock을 이미 잡고 있는 컨텍스트에서만 호출한다.
+        (self.planner_lock은 RLock이라 같은 스레드에서 재진입해도 안전하다.)
+        """
+        if retreat_distance_m is None:
+            retreat_distance_m = self._retreat_distance_m
+        if len(self.position_history) < 2:
+            return None
+
+        raw = [self.position_history[-1]]
+        accumulated = 0.0
+        for i in range(len(self.position_history) - 2, -1, -1):
+            p_prev = self.position_history[i + 1]
+            p_curr = self.position_history[i]
+            accumulated += math.hypot(p_curr[0] - p_prev[0], p_curr[1] - p_prev[1])
+            raw.append(p_curr)
+            if accumulated >= retreat_distance_m:
+                break
+
+        safe = [raw[0]]
+        for p1, p2 in zip(raw, raw[1:]):
+            if not self.path_planner._is_straight_line_walkable(p1, p2):
+                break
+            safe.append(p2)
+
+        return safe if len(safe) >= 2 else None
+
+    def handle_object_detected(self, x_min, x_max, z_min, z_max, obj_type='enemy_tank'):
+        """
+        우리 쪽 인지 파이프라인(팀원 작업, world 좌표 확보 후)이 직접 호출하는
+        진입점. Flask 라우트가 아니라 일반 메서드라서:
+
+            drive_controller.handle_object_detected(40, 46, 100, 106, obj_type='enemy_tank')
+
+        처리 순서:
+            1) 오브젝트 패딩 처리 (path_planner.pad_object)
+            2) 그로 인해 지금 self.path가 막혔는지 판단 (path_planner.is_path_blocked)
+            3-a) 안 막혔으면 -> 아무것도 안 하고 그대로 진행
+            3-b) 막혔으면 -> 현재 위치가 그 패딩(통행 불가 셀) 위에 서 있는지 판단
+                 - 서 있음   -> 후퇴 모드로 전환, retreat 경로로 self.path 교체
+                 - 안 서 있음 -> 전진 방향으로 강제 재탐색해서 self.path 교체, advance 모드 유지
+
+        Returns
+        -------
+        dict: 상태 설명용. 서버/호출부가 로깅 등에 참고만 하면 된다.
+        """
+        current_position = self._current_info_position()
+        destination_xz = self._destination_xz()
+        if current_position is None or destination_xz is None:
+            return {"status": "skipped", "reason": "position/destination not ready"}
+
+        with self.planner_lock:
+            changed_cells = self.path_planner.pad_object(x_min, x_max, z_min, z_max, obj_type)
+            blocked = self.path_planner.is_path_blocked(self.path)
+
+            if not blocked:
+                return {
+                    "status": "clear",
+                    "path_blocked": False,
+                    "changed_cells": len(changed_cells or []),
+                }
+
+            current_grid = self.path_planner.world_to_grid(current_position, clamp=True)
+            standing_on_blocked_cell = not self.path_planner.is_free(current_grid)
+
+            if standing_on_blocked_cell:
+                retreat_path = self._build_retreat_path()
+
+                if retreat_path is None:
+                    # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
+                    # 그 자리에서 강제 재탐색을 시도한다 (find_path의
+                    # clear_start_area 비상 탈출 로직에 의존).
+                    new_path = self.path_planner.replan_if_needed(
+                        current_position, destination_xz,
+                        save_path=self.save_path, force=True,
+                    )
+                    self.path = new_path or []
+                    self.vehicle_mode = 'advance'
+                    return {
+                        "status": "forced_replan_no_history",
+                        "path_blocked": True,
+                        "changed_cells": len(changed_cells or []),
+                    }
+
+                self.path = retreat_path
+                self.vehicle_mode = 'retreat'
+                return {
+                    "status": "retreating",
+                    "path_blocked": True,
+                    "changed_cells": len(changed_cells or []),
+                    "retreat_points": len(retreat_path),
+                }
+
+            else:
+                new_path = self.path_planner.replan_if_needed(
+                    current_position, destination_xz,
+                    save_path=self.save_path, force=True,
+                )
+                self.path = new_path or []
+                self.vehicle_mode = 'advance'
+                return {
+                    "status": "replanned",
+                    "path_blocked": True,
+                    "changed_cells": len(changed_cells or []),
+                }
+
 
     def handle_info(self, data):
         """/info의 상태 저장 + 속도 갱신 + 응답 생성을 모두 처리한다."""
@@ -1903,6 +2078,9 @@ class TankDriveController:
         self.destination = (x, y, z)
         check_destination_change((x, z))
 
+        # 새 목적지가 들어오면 후퇴 중이었더라도 전진 상태로 복귀한다.
+        self.vehicle_mode = 'advance'
+
         # 이미 episode가 시작된 상태라면 새 목적지로 즉시 재계획한다.
         current_position = self._current_info_position()
         if self.initialized and current_position is not None:
@@ -1922,6 +2100,7 @@ class TankDriveController:
             self.path_planner.update_dstar_obstacles_from_payload(data)
 
         if self.initialized:
+            self.vehicle_mode = 'advance'
             self._replan(self._current_info_position(), force=True)
 
         return {"status": "success", "message": "Obstacle data received"}, 200
@@ -1937,6 +2116,8 @@ class TankDriveController:
 
         self.initialized = True
         self.path = []
+        self.position_history = []
+        self.vehicle_mode = 'advance'
         self._replan(start_position, force=True)
         return self.path
 
@@ -1958,6 +2139,8 @@ class TankDriveController:
             }
         
         current_position = self._extract_xz_from_action(data)
+        self._record_position_history(current_position)
+        self._check_retreat_arrival(current_position)
         self._replan(current_position)
 
         destination_xz = self._destination_xz()
@@ -1976,6 +2159,12 @@ class TankDriveController:
             destination_xz[0] - current_position[0],
             destination_xz[1] - current_position[1],
         )
+
+        # 참고: 후퇴 중(vehicle_mode == 'retreat')에도 distance_to_goal은 여전히
+        # 원래 목적지 기준이다. self.path 자체는 retreat 경로로 바뀌어 있어서
+        # 실제 조향은 후퇴 방향으로 나가지만, 코너/목적지 감속 계산은 원래
+        # 목적지까지의 거리로 이뤄진다 (거리가 멀어 감속에 거의 영향 없음).
+        # 후퇴 전용 감속 프로파일이 필요하면 이 블록을 모드별로 분기해야 한다.
 
         arrival_command = update_arrival_state(
             distance_to_goal=distance_to_goal,

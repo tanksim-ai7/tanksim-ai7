@@ -170,7 +170,7 @@ class DStarPlanner:
                 z_max=item["z_max"],
             )
             obs_list.append(obs)
-        self.set_obstacles(obs_list)
+        return self.set_obstacles(obs_list)
 
     # --------------------------------------------------
     # 좌표 변환
@@ -755,6 +755,46 @@ class DStarPlanner:
     # 재계획 / 재플롯 판단 (서버 쪽 상태 관리를 없애기 위한 래퍼)
     # --------------------------------------------------
 
+
+    def pad_object(self, x_min, x_max, z_min, z_max, obj_type='enemy_tank'):
+        """
+        Unity의 /update_obstacle 콜백과 무관하게, 우리 쪽 인지 파이프라인이
+        직접 확보한 오브젝트 world 좌표를 맵에 추가로 패딩 처리한다.
+
+        set_obstacles()는 넘겨받은 리스트로 obstacle_rectangles 전체를
+        교체하는 방식이라, 기존 목록에 이번 오브젝트만 append한 뒤
+        다시 통째로 넘겨서 '추가' 효과를 낸다.
+
+        Returns
+        -------
+        set[GridNode]
+            이번 호출로 실제로 통행 가능/불가 상태가 바뀐 grid 셀들.
+        """
+        new_rect = ObstacleRect(
+            x_min=min(x_min, x_max), x_max=max(x_min, x_max),
+            z_min=min(z_min, z_max), z_max=max(z_min, z_max),
+            type=obj_type,
+        )
+        combined = list(self.obstacle_rectangles) + [new_rect]
+        return self.set_obstacles(combined)
+
+    def is_path_blocked(self, world_path):
+        """
+        world_path(waypoint 리스트)가 현재 obstacles/terrain_blocked 기준으로
+        여전히 통행 가능한지 검사한다.
+
+        world_path는 ultimate_one_pass_compression()이 만든 코너점만 남긴
+        희소한 리스트이므로, waypoint 자체가 아니라 waypoint '사이 직선 구간'을
+        _is_straight_line_walkable()로 재검사한다 (경로 압축과 동일 로직 재사용).
+        pad_object() 등으로 obstacles가 바뀐 '직후'에 호출해야 최신 상태를 반영한다.
+        """
+        if not world_path or len(world_path) < 2:
+            return False
+        return any(
+            not self._is_straight_line_walkable(p1, p2)
+            for p1, p2 in zip(world_path, world_path[1:])
+        )
+
     def reset_replan_tracking(self):
         """
         /init 등 에피소드가 새로 시작될 때 호출한다.
@@ -803,6 +843,71 @@ class DStarPlanner:
             self.plot_async(path, save_path=save_path)
 
         return path
+
+
+    def report_detected_object(self, x_min, x_max, z_min, z_max, obj_type,
+                            current_pos, save_path=None):
+        """
+        Unity의 /update_obstacle 콜백 없이, 우리 쪽에서 직접 인지한
+        오브젝트(적 전차 등)를 맵에 패딩 처리하고, 그로 인해 현재 경로가
+        막혔으면 바로 재탐색까지 수행하는 단일 진입점.
+
+        set_obstacles()는 리스트를 통째로 교체하는 방식이므로, 기존
+        obstacle_rectangles에 이번 오브젝트만 append한 뒤 다시 전체를
+        넘겨서 '추가' 효과를 낸다.
+
+        전제: 이 시점까지 최소 한 번은 find_path/replan_if_needed가 돌아서
+            self.goal 이 현재 목적지로 유효하게 세팅돼 있어야 한다.
+
+        Returns
+        -------
+        dict: {
+            "changed_cells": set[GridNode],
+            "path_blocked": bool,
+            "replanned": bool,
+            "path": list[WorldPoint] | None,   # replanned=True일 때만 채워짐
+        }
+        """
+        new_rect = ObstacleRect(
+            x_min=min(x_min, x_max), x_max=max(x_min, x_max),
+            z_min=min(z_min, z_max), z_max=max(z_min, z_max),
+            type=obj_type,
+        )
+        combined = list(self.obstacle_rectangles) + [new_rect]
+        changed_cells = self.set_obstacles(combined)  # grid 반영 + update_vertex까지 내부에서 처리됨
+
+        result = {
+            "changed_cells": changed_cells,
+            "path_blocked": False,
+            "replanned": False,
+            "path": None,
+        }
+
+        # 아직 경로가 없으면(=최초 상태) 막힘 판정 자체가 의미 없다.
+        if not self.last_path or len(self.last_path) < 2:
+            return result
+
+        # waypoint가 아니라 waypoint '사이 구간'을 재검사 (경로 압축과 동일 로직 재사용)
+        blocked = any(
+            not self._is_straight_line_walkable(p1, p2)
+            for p1, p2 in zip(self.last_path, self.last_path[1:])
+        )
+        result["path_blocked"] = blocked
+        if not blocked:
+            return result
+
+        dest_world = self.grid_to_world(self.goal)  # 현재 목적지를 self.goal에서 그대로 가져옴
+        new_path = self._find_path_with_recovery(current_pos, dest_world)
+
+        self._replan_start_grid = self.world_to_grid(current_pos, clamp=True)
+        self._replan_goal_grid = self.goal
+
+        if save_path:
+            self.plot_async(new_path, save_path=save_path)
+
+        result["replanned"] = True
+        result["path"] = new_path
+        return result
 
     def _extract_grid_path(self, max_path_length=None):
         if self.start == self.goal:
