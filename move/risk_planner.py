@@ -415,6 +415,14 @@ class RiskDStarPlanner(DStarPlanner):
             ax.add_patch(rect_grid)
         ax.plot([], [], color='magenta', alpha=0.3, label="Blocked Terrain", linestyle='-', linewidth=5)
 
+        for x,z in self.obstacles:
+            patch = Rectangle(
+                ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
+                1.0, 1.0,
+                alpha=0.5,
+            )
+            ax.add_patch(patch)
+
         for obs in obstacle_rectangles:
             patch = Rectangle(
                 (obs.x_min - obstacle_margin, obs.z_min - obstacle_margin),
