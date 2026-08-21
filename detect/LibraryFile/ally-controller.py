@@ -21,9 +21,8 @@ drive_controller = TankDriveController(path_planner)
 
 @app.route('/detect', methods=['POST'])
 def detect():
-    tsinjee.detect()
+    filtered_results = tsinjee.detect()
     
-    filtered_results = []
     return jsonify(filtered_results)
 
 @app.route('/stereo_image', methods=['POST'])

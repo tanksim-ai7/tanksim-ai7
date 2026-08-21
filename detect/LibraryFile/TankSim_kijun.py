@@ -1,4 +1,19 @@
-import TankSim as ts
+# library선언 및 변수 선언
+from flask import Flask, request, jsonify
+from ultralytics import YOLO
+from pathlib import Path
+from astar_planner import AStarPlanner, ObstacleRect
+
+import os
+import torch
+import math
+import uuid
+import cv2
+import numpy as np
+
+app = Flask(__name__)
+MODEL_PATH = Path("./models/best.yolov11s.pt")
+model = YOLO(str(MODEL_PATH))
 
 VERTICAL_FOV = 28.0  # deg, 기존과 동일 가정
 HORIZONTAL_FOV_STEREO = 47.81061
@@ -35,7 +50,7 @@ MIN_SAMPLES_BEFORE_OUTPUT = 3   # 이 개수만큼 쌓이기 전엔 값을 내�
 # 기능(함수) 모음 cell
 # [NEW] 이미지 하나당 YOLO 추론을 딱 1번만 실행 (클래스별로 재추론하지 않음)
 def run_inference(image_path):
-    results = ts.model(image_path, verbose=False)
+    results = model(image_path, verbose=False)
     img_h, img_w = results[0].orig_shape                # 이미지의 가로값, 세로 값을 도출
                                                         # YOLO는 자체적으로 640x640으로 리사이징해서 처리함.
                                                         # offset을 구하는공식에서 640을 그대로 써버리면 값이 error
@@ -74,12 +89,12 @@ def match_stereo_boxes(left_boxes, right_boxes, y_tolerance=20):
     return pairs
 
 def pixel_offset_to_angle(pixel_offset_ratio, fov_deg):
-    half_fov_rad = ts.math.radians(fov_deg / 2)
-    return ts.math.degrees(ts.math.atan(pixel_offset_ratio * ts.math.tan(half_fov_rad)))
+    half_fov_rad = math.radians(fov_deg / 2)
+    return math.degrees(math.atan(pixel_offset_ratio * math.tan(half_fov_rad)))
 
 
 def get_focal_px(img_w, fov_deg=HORIZONTAL_FOV_STEREO):
-    return (img_w / 2) / ts.math.tan(ts.math.radians(fov_deg / 2))
+    return (img_w / 2) / math.tan(math.radians(fov_deg / 2))
 
 # 오차값 줄이기 위한 함수
 def smooth_position(class_name, world_pos):
@@ -100,7 +115,7 @@ def smooth_position(class_name, world_pos):
 
     # 중앙값에서 OUTLIER_THRESHOLD 이상 벗어난 관측은 제외
     def dist_to_med(p):
-        return ts.math.sqrt((p["x"]-med["x"])**2 + (p["y"]-med["y"])**2 + (p["z"]-med["z"])**2)
+        return math.sqrt((p["x"]-med["x"])**2 + (p["y"]-med["y"])**2 + (p["z"]-med["z"])**2)
 
     filtered = [p for p in hist if dist_to_med(p) <= OUTLIER_THRESHOLD]
     if not filtered:
@@ -121,7 +136,7 @@ def compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h):
     if not left_pos or not right_pos or not left_rot:
         return None
 
-    baseline = ts.math.sqrt(
+    baseline = math.sqrt(
         (left_pos["x"] - right_pos["x"]) ** 2 +
         (left_pos["y"] - right_pos["y"]) ** 2 +
         (left_pos["z"] - right_pos["z"]) ** 2
@@ -142,17 +157,17 @@ def compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h):
     bearing = (left_rot["y"] + h_offset) % 360
     vertical = left_rot["x"] - v_offset   # 지난번 검증한 부호
 
-    rad_h, rad_v = ts.math.radians(bearing), ts.math.radians(vertical)
-    dx = depth * ts.math.cos(rad_v) * ts.math.sin(rad_h)
-    dz = depth * ts.math.cos(rad_v) * ts.math.cos(rad_h)
-    dy = depth * ts.math.sin(rad_v)
+    rad_h, rad_v = math.radians(bearing), math.radians(vertical)
+    dx = depth * math.cos(rad_v) * math.sin(rad_h)
+    dz = depth * math.cos(rad_v) * math.cos(rad_h)
+    dy = depth * math.sin(rad_v)
 
     world_pos = {"x": left_pos["x"] + dx, "y": left_pos["y"] + dy, "z": left_pos["z"] + dz}
 
     player_pos = LATEST_INFO.get("playerPos")
     distance_3d = None
     if player_pos:
-        distance_3d = ts.math.sqrt(
+        distance_3d = math.sqrt(
             (player_pos["x"] - world_pos["x"]) ** 2 +
             (player_pos["y"] - world_pos["y"]) ** 2 +
             (player_pos["z"] - world_pos["z"]) ** 2
@@ -191,7 +206,7 @@ def scan_all_objects(target_classes, left_path="temp_left.jpg", right_path="temp
 
             player_pos = LATEST_INFO.get("playerPos")
             if player_pos:
-                result["distance"] = ts.math.sqrt(
+                result["distance"] = math.sqrt(
                     (player_pos["x"] - smoothed_pos["x"]) ** 2 +
                     (player_pos["y"] - smoothed_pos["y"]) ** 2 +
                     (player_pos["z"] - smoothed_pos["z"]) ** 2
@@ -246,14 +261,14 @@ def save_detected_object_info(objects):
 
 # 여기부터 서버 통신 함수
 # def detect():
-#     image = ts.request.files.get('image')
+#     image = request.files.get('image')
 #     if not image:
-#         return ts.jsonify({"error": "No image received"}), 400
+#         return jsonify({"error": "No image received"}), 400
 
 #     image_path = 'temp_image.jpg'
 #     image.save(image_path)
 
-#     results = ts.model(image_path, verbose=False)
+#     results = model(image_path, verbose=False)
 #     detections = results[0].boxes.data.cpu().numpy()
 #     #print(results[0].boxes.data)
 #     #target_classes = {0: "human1",1: "human2"}
@@ -283,27 +298,42 @@ def save_detected_object_info(objects):
 #                 'filled': False,
 #                 'updateBoxWhileMoving': False
 #             })
-#     return ts.jsonify(filtered_results)
+
+#     return jsonify(filtered_results)
     
 def stereo_image():                             # 오브젝트 좌표, 위협도, 거리 계산은 다 여기서 실시.    
     global THREAT_PER                           # (위협도 관련)
     global DETECTED_OBJECTS_INFO
     
-    left_image = ts.request.files.get('left_image')
-    right_image = ts.request.files.get('right_image')
+    left_image = request.files.get('left_image')
+    right_image = request.files.get('right_image')
 
     if not left_image or not right_image:
-        return ts.jsonify({"result": "error", "message": "Left or Right image missing"}), 400
+        return jsonify({"result": "error", "message": "Left or Right image missing"}), 400
 
-    req_id = ts.uuid.uuid4().hex   # [NEW] 요청마다 고유 ID
+    req_id = uuid.uuid4().hex   # [NEW] 요청마다 고유 ID
     left_path = f"temp_left_{req_id}.jpg"     # [NEW]
     right_path = f"temp_right_{req_id}.jpg"   # [NEW]
     left_image.save(left_path)
     right_image.save(right_path)
 
     #target_classes = {0: "human1", 1: "human2"}   # 나중에 실제 클래스로 확장
-
-    objects = scan_all_objects(ts.target_classes, left_path, right_path)
+    target_classes = {
+        0: 'Car', 
+        1: 'House', 
+        2: 'Human1', 
+        3: 'Human2', 
+        4: 'Human3', 
+        5: 'Mine', 
+        6: 'Rock', 
+        7: 'Tank1', 
+        8: 'Tank2', 
+        9: 'Tent', 
+        10: 'Tree', 
+        11: 'Wall'
+    }
+    
+    objects = scan_all_objects(target_classes, left_path, right_path)
     ranked = rank_objects_by_threat(objects)
     DETECTED_OBJECTS_INFO = save_detected_object_info(objects)
     total = total_threat_score(ranked)          # 눈(카메라)에 보이는 위협도의 총합 (위협도 관련)
@@ -317,24 +347,24 @@ def stereo_image():                             # 오브젝트 좌표, 위협도
     # print(f"[스캔 결과] 총 {len(objects)}개 객체 탐지")
     # for obj in objects:
     #     print(f"  - {obj['class_name']}: 위치={obj['world_pos']}, 거리={obj['distance']:.1f}m")
-    ts.os.remove(left_path)
-    ts.os.remove(right_path)
-    return ts.jsonify({"result": "success"})
+    os.remove(left_path)
+    os.remove(right_path)
+    return jsonify({"result": "success"})
     
 def info():              # 내 위치값, 회전값등을 가져와야하기 때문에 여기서 LATEST_INFO에 로그데이터를 저장.
     # info는 Log Mode를 켜야만 작동이 되는 함수.
     global LATEST_INFO
-    data = ts.request.get_json(force=True)
+    data = request.get_json(force=True)
     if not data:
-        return ts.jsonify({"error": "No JSON received"}), 400
+        return jsonify({"error": "No JSON received"}), 400
 
     LATEST_INFO = data   # <- 추가   lidarRotation
 
-    return ts.jsonify({"status": "success", "control": ""})
+    return jsonify({"status": "success", "control": ""})
 
 
 def get_action():
-    data = ts.request.get_json(force=True)
+    data = request.get_json(force=True)
 
     position = data.get("position", {})
     turret = data.get("turret", {})
@@ -361,43 +391,43 @@ def get_action():
         }
 
     print("🔁 Sent Combined Action:", command)
-    return ts.jsonify(command)
+    return jsonify(command)
 
 def update_bullet():
-    data = ts.request.get_json()
+    data = request.get_json()
     if not data:
-        return ts.jsonify({"status": "ERROR", "message": "Invalid request data"}), 400
+        return jsonify({"status": "ERROR", "message": "Invalid request data"}), 400
 
     print(f"💥 Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={data.get('hit')}")
-    return ts.jsonify({"status": "OK", "message": "Bullet impact data received"})
+    return jsonify({"status": "OK", "message": "Bullet impact data received"})
 
 
 def set_destination():
-    data = ts.request.get_json()
+    data = request.get_json()
     if not data or "destination" not in data:
-        return ts.jsonify({"status": "ERROR", "message": "Missing destination data"}), 400
+        return jsonify({"status": "ERROR", "message": "Missing destination data"}), 400
 
     try:
         x, y, z = map(float, data["destination"].split(","))
         print(f"🎯 Destination set to: x={x}, y={y}, z={z}")
-        return ts.jsonify({"status": "OK", "destination": {"x": x, "y": y, "z": z}})
+        return jsonify({"status": "OK", "destination": {"x": x, "y": y, "z": z}})
     except Exception as e:
-        return ts.jsonify({"status": "ERROR", "message": f"Invalid format: {str(e)}"}), 400
+        return jsonify({"status": "ERROR", "message": f"Invalid format: {str(e)}"}), 400
 
 
 def update_obstacle():
-    data = ts.request.get_json()
+    data = request.get_json()
     if not data:
-        return ts.jsonify({'status': 'error', 'message': 'No data received'}), 400
+        return jsonify({'status': 'error', 'message': 'No data received'}), 400
     
     print("🪨 Obstacle Data:", data)
-    return ts.jsonify({'status': 'success', 'message': 'Obstacle data received'})
+    return jsonify({'status': 'success', 'message': 'Obstacle data received'})
 
 
 def collision():
-    data = ts.request.get_json()
+    data = request.get_json()
     if not data:
-        return ts.jsonify({'status': 'error', 'message': 'No collision data received'}), 400
+        return jsonify({'status': 'error', 'message': 'No collision data received'}), 400
 
     object_name = data.get('objectName')
     position = data.get('position', {})
@@ -407,20 +437,11 @@ def collision():
 
     print(f"💥 Collision Detected - Object: {object_name}, Position: ({x}, {y}, {z})")
 
-    return ts.jsonify({'status': 'success', 'message': 'Collision data received'})
+    return jsonify({'status': 'success', 'message': 'Collision data received'})
 
 #Endpoint called when the episode starts
 def init():
-    return ts.jsonify(config)
+    return jsonify(config)
 
 def start():
-    return ts.jsonify({"control": ""})
-
-if __name__ == '__main__':
-    ts.app.run(
-        host="0.0.0.0",
-        port=5000,
-        threaded=True,
-        debug=False,
-        use_reloader=False
-    )
+    return jsonify({"control": ""})
