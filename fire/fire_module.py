@@ -46,7 +46,7 @@ auto_aim_bot_v6.py 에서 추출한 것
 import math
 from typing import Optional, Tuple, Dict
 
-from fire_control import (Ballistics, FireControl, TurretParams, TargetSize,
+from fire.fire_control import (Ballistics, FireControl, TurretParams, TargetSize,
                           TargetTracker, MotionLimits, BiasEstimator,
                           impact_aspect, aspect_zone, bearing, ang_diff,
                           dist2d, optimal_range)

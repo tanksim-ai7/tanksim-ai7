@@ -78,8 +78,8 @@ def detect():
         # ============================
         result = ts.model.predict(
             source=frame,
-            imgsz=1280,
-            conf=0.15,
+            imgsz=960,
+            conf=0.25,
             iou=0.45,
             device=DEVICE,
             verbose=False,

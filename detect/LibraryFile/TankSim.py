@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 app = Flask(__name__)
-MODEL_PATH = Path("./models/best.yolov11s.pt")
+MODEL_PATH = Path("./models/260819_best.pt")
 model = YOLO(str(MODEL_PATH))
 
 target_classes = {
