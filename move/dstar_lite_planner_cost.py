@@ -125,6 +125,9 @@ class DStarPlanner:
         self.obstacle_rectangles: List[ObstacleRect] = []
         self.obstacles: Set[GridNode] = set(obstacles or [])
 
+        # 움직일 수 있는 적 전차에 대한 변수
+        self.movable_enemy_tank: Set[GridNode] = set([])
+
         # 각 자유 셀의 장애물 근접 추가 비용. 값이 없으면 추가 비용 0.
         self.clearance_costs: Dict[GridNode, float] = {}
         self.obstacle_distances: Dict[GridNode, float] = {}
@@ -221,7 +224,7 @@ class DStarPlanner:
 
     def is_free(self, node):
         # return self.in_bounds(node) and node not in self.obstacles and node not in self.high
-        return self.in_bounds(node) and node not in self.obstacles
+        return self.in_bounds(node) and node not in self.obstacles and node not in self.movable_enemy_tank
 
     def heuristic(self, a, b):
         dx = abs(a[0] - b[0])
@@ -592,11 +595,88 @@ class DStarPlanner:
 
         return unique_path
 
-    def find_path(self, current_pos, dest):
+    def get_occupied_space(corners):
+        """
+        4개의 꼭짓점(실수 좌표) 내부 및 경계선에 위치한 모든 정수 격자 좌표(x, z)를 set으로 반환합니다.
+        """
+        occupied = set()
+        n = len(corners)
+        if n < 3:
+            return occupied
+
+        # 1. 바운딩 박스(최소/최대 정수 범위) 계산하여 탐색 구역 제한
+        xs = [c[0] for c in corners]
+        zs = [c[1] for c in corners]
+        min_x = math.floor(min(xs))
+        max_x = math.ceil(max(xs))
+        min_z = math.floor(min(zs))
+        max_z = math.ceil(max(zs))
+
+        # 2. Ray Casting 알고리즘으로 내부 점 판별
+        for z in range(min_z, max_z + 1):
+            for x in range(min_x, max_x + 1):
+                inside = False
+                p1x, p1z = corners[0]
+                
+                for i in range(n + 1):
+                    p2x, p2z = corners[i % n]
+                    # 현재 정수 좌표 (x, z)가 다각형 변과 교차하는지 검사
+                    if min(p1z, p2z) < z <= max(p1z, p2z):
+                        if p1z != p2z:
+                            x_inters = (z - p1z) * (p2x - p1x) / (p2z - p1z) + p1x
+                            if p1x == p2x or x <= x_inters:
+                                inside = not inside
+                    p1x, p1z = p2x, p2z
+                    
+                if inside:
+                    occupied.add((x, z))
+                    
+        return occupied
+
+    def get_bb_corners(cx, cz, width, height, angle_degrees):
+        rad = math.radians(angle_degrees)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        hx, hz = width / 2.0, height / 2.0
+        
+        local_corners = [(hx, hz), (hx, -hz), (-hx, -hz), (-hx, hz)]
+        global_corners = []
+        for lx, lz in local_corners:
+            gx = lx * cos_a + lz * sin_a + cx
+            gz = -lx * sin_a + lz * cos_a + cz
+            global_corners.append((gx, gz))
+        return global_corners
+
+
+    def find_path(self, current_pos, dest, latest_info=None):
         """
         서버 호출:
             current_path = planner.find_path(current_pos, dest)
         """
+
+        # self.movable_enemy_tank
+        # 움직일 수 있는 적 전차 위치에 대한 변수 업데이트
+        if latest_info != None:
+            cx, cz = latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]
+            body_angle = latest_info["enemyBodyX"]
+            turret_angle = latest_info["enemyTurretX"]
+
+            body_corners = self.get_bb_corners(cx, cz, 3.303, 6.339, body_angle)
+            turret_corners = self.get_bb_corners(cx, cz, 2.681, 2.822, turret_angle)
+
+            body_tiles = self.get_occupied_space(body_corners)
+            turret_tiles = self.get_occupied_space(turret_corners)
+
+            base_enemy_space = body_tiles.union(turret_tiles)
+
+            padded_enemy_space = set()
+            for x, z in base_enemy_space:
+                for dx in [-1, 0, 1]:
+                    for dz in [-1, 0, 1]:
+                        padded_enemy_space.add((x + dx, z + dz))
+
+            self.movable_enemy_tank = padded_enemy_space
+
         start = self.world_to_grid(current_pos, clamp=True)
         goal = self.world_to_grid(dest, clamp=True)
 

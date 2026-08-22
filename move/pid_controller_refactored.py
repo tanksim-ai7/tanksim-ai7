@@ -29,7 +29,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from move.dstar_lite_planner_cost import DStarPlanner, ObstacleRect
+from move.dstar_lite_planner_cost import ObstacleRect
+from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 
 
 # ============================================================
@@ -703,7 +704,7 @@ class TankDriveController:
 
     def __init__(
         self,
-        path_planner: DStarPlanner,
+        path_planner: DStarLitePlanner,
         map_image_path: str = "dstar_map.png",
     ) -> None:
         """
@@ -711,7 +712,7 @@ class TankDriveController:
 
         Args:
             path_planner:
-                서버에서 생성한 DStarPlanner 또는 RiskDStarPlanner.
+                서버에서 생성한 DStarLitePlanner 또는 RiskDStarPlanner.
                 경로계획 파라미터는 planner가 소유하며
                 PID Controller에서 중복 정의하지 않는다.
 
@@ -724,6 +725,8 @@ class TankDriveController:
             raise ValueError(
                 "TankDriveController requires path_planner."
             )
+
+        self.stop_flag = False
 
         self.planner = path_planner
 
@@ -1284,6 +1287,7 @@ class TankDriveController:
             self.current_path = self.planner.find_path(
                 self.current_pos,
                 self.dest,
+                self.latest_info
             )
 
         self.render_map(
@@ -1323,6 +1327,9 @@ class TankDriveController:
         Returns:
             (response dictionary, HTTP status code)
         """
+        self.stop_flag = True
+        self.current_path = []
+
         data = data or {}
 
         if "destination" not in data:
@@ -1409,7 +1416,7 @@ class TankDriveController:
                 obstacles 배열을 포함하는 JSON dictionary.
 
         Returns:
-            DStarPlanner.set_obstacles()가 반환한 changed_cells.
+            DStarLitePlanner.set_obstacles()가 반환한 changed_cells.
         """
         obs_list = []
 
@@ -1496,6 +1503,7 @@ class TankDriveController:
                     self.current_path = self.planner.find_path(
                         self.current_pos,
                         self.dest,
+                        self.latest_info
                     )
 
             except ValueError as exc:
@@ -1920,6 +1928,16 @@ class TankDriveController:
         Returns:
             시뮬레이터에 보낼 command dictionary.
         """
+        if self.stop_flag:
+            self.stop_flag = False
+            return {
+                "moveWS": {"command": "STOP", "weight": 1.0},
+                "moveAD": {"command": "", "weight": 0.0},
+                "turretQE": {"command": "", "weight": 0.0},
+                "turretRF": {"command": "", "weight": 0.0},
+                "fire": False
+            }
+        
         data = data or {}
 
         position = data.get(
@@ -2067,6 +2085,7 @@ class TankDriveController:
                         self.planner.find_path(
                             self.current_pos,
                             self.dest,
+                            self.latest_info
                         )
                     )
 
