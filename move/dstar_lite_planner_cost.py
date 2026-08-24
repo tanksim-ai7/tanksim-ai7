@@ -131,8 +131,6 @@ class DStarPlanner:
         # 움직일 수 있는 적 전차에 대한 변수
         self.movable_enemy_tank: Set[GridNode] = set([])
 
-        self.is_enemy = False
-
         # 각 자유 셀의 장애물 근접 추가 비용. 값이 없으면 추가 비용 0.
         self.clearance_costs: Dict[GridNode, float] = {}
         self.obstacle_distances: Dict[GridNode, float] = {}
