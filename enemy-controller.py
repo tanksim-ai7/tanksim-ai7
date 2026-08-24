@@ -7,8 +7,8 @@ from move.pid_controller import TankDriveController
 
 app = Flask(__name__)
 
-path_planner = DStarLitePlanner(True)
-drive_controller = TankDriveController(path_planner)
+path_planner = DStarLitePlanner(is_enemy=True)
+drive_controller = TankDriveController(path_planner, "dstar_enemy_map.png")
 
 
 tmp_flag = True
@@ -51,10 +51,10 @@ def info():
     data['playerPos'] = data['enemyPos']
     data['playerSpeed'] = data['enemySpeed']
     data['playerTurretX'] = data['enemyTurretX']
-    data['enemyTurretY'] = data['enemyTurretY']
-    data['enemyBodyX'] = data['enemyBodyX']
-    data['enemyBodyY'] = data['enemyBodyY']
-    data['enemyBodyZ'] = data['enemyBodyZ']
+    data['playerTurretY'] = data['enemyTurretY']
+    data['playerBodyX'] = data['enemyBodyX']
+    data['playerBodyY'] = data['enemyBodyY']
+    data['playerBodyZ'] = data['enemyBodyZ']
 
     response, status = drive_controller.handle_info(data)
     global tmp_flag

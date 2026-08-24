@@ -258,6 +258,9 @@ class RiskDStarPlanner(DStarPlanner):
             서버 호출:
                 planner.plot(path=current_path, show_grid=True, title="...")
             """
+            if self.is_enemy:
+                return
+            
             active_path = self.last_path if path is None else path
     
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -332,15 +335,15 @@ class RiskDStarPlanner(DStarPlanner):
                     )
                     ax.add_patch(patch)
 
-            if self.is_enemy:
-                for x,z in self.movable_enemy_tank:
-                    patch = Rectangle(
-                        ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
-                        1.0, 1.0,
-                        facecolor='purple', 
-                        alpha=0.5,
-                    )
-                    ax.add_patch(patch)
+            
+            for x,z in self.movable_enemy_tank:
+                patch = Rectangle(
+                    ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
+                    1.0, 1.0,
+                    facecolor='purple', 
+                    alpha=0.5,
+                )
+                ax.add_patch(patch)
     
             if active_path:
                 px = [point[0] for point in active_path]
