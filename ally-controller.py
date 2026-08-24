@@ -7,6 +7,8 @@ import detect.LibraryFile.TankSim as ts
 import detect.LibraryFile.TankSim_kijun as tskijun
 import detect.LibraryFile.TankSim_injee as tsinjee
 import matplotlib
+import requests
+import threading
 
 # 서버 환경에서 matplotlib GUI 창을 열지 않고 map 이미지만 저장한다.
 matplotlib.use("Agg")
@@ -75,7 +77,24 @@ def info():
     # 기존 인식팀 /info 처리.
     tskijun.info()
 
-    return jsonify(response), status
+    # target_url = "http://127.0.0.1:5100/info"
+    # try:
+    #     response_5100 = requests.post(target_url, json=data, timeout=3)
+    #     print(f"5100 포트 전송 성공 (상태코드: {response_5100.status_code})")
+    # except requests.exceptions.RequestException as e:
+    #     print(f"5100 포트 전송 실패: {e}")
+    
+    # 5100번 전송 함수를 별도로 정의
+    def send_to_5100(target_data):
+        try:
+            requests.post("http://127.0.0.1:5100/info", json=target_data, timeout=1)
+        except requests.exceptions.RequestException:
+            pass
+
+    # 백그라운드 스레드로 전송하여 5100번 응답을 기다리지 않고 즉시 아래 return을 실행
+    threading.Thread(target=send_to_5100, args=(data,), daemon=True).start()
+
+    return jsonify(response)
 
 
 @app.route('/get_action', methods=['POST'])
@@ -159,6 +178,17 @@ def set_destination():
 def update_obstacle():
     """장애물 정보를 주행 controller -> RiskDStarPlanner에 전달한다."""
     response, status = drive_controller.handle_update_obstacles(request.get_json())
+
+    def send_to_5100(target_data):
+        try:
+            requests.post("http://127.0.0.1:5100/update_obstacle", json=target_data, timeout=1)
+        except requests.exceptions.RequestException:
+            pass
+
+    # 백그라운드 스레드로 전송하여 5100번 응답을 기다리지 않고 즉시 아래 return을 실행
+    threading.Thread(target=send_to_5100, args=(request.get_json(),), daemon=True).start()
+
+
     return jsonify(response), status
 
 
@@ -211,6 +241,15 @@ def init():
     # D* Lite/PID 내부 상태의 시작 위치 [x, z]를 simulator와 일치시킨다.
     drive_controller.initialize(start_position=(60.0, 27.23))
 
+    def send_to_5100(target_data):
+        try:
+            requests.post("http://127.0.0.1:5100/init", json=target_data, timeout=1)
+        except requests.exceptions.RequestException:
+            pass
+
+    # 백그라운드 스레드로 전송하여 5100번 응답을 기다리지 않고 즉시 아래 return을 실행
+    threading.Thread(target=send_to_5100, args=(config,), daemon=True).start()
+    
     return jsonify(config)
 
 

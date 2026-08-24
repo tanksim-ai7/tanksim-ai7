@@ -37,6 +37,7 @@ from move.dstar_lite_planner_cost import DStarPlanner, INF
 class RiskDStarPlanner(DStarPlanner):
 
     def __init__(self, *args,
+                 is_enemy = False,
                  slope_weight=3.0,
                  exposure_weight=6.0,
                  threat_weight=40.0,
@@ -58,7 +59,8 @@ class RiskDStarPlanner(DStarPlanner):
             고도맵이 2 m 격자이고 전차 폭이 3.6 m 이므로
             150x150 (셀 2 m) 로 충분하고, 노드가 1/4 이라 훨씬 빠르다.
         """
-        super().__init__(*args, **kw)
+        super().__init__(is_enemy=is_enemy, *args, **kw)
+
         self.cell_size = float(cell_size)
         self.slope_weight = float(slope_weight)
         self.exposure_weight = float(exposure_weight)
@@ -68,6 +70,8 @@ class RiskDStarPlanner(DStarPlanner):
         self.exposure = None          # (H, W) float, 0~1
         self.threat = None            # (H, W) float, 0~1  동적
         self.terrain_blocked = set()  # 경사 한계 초과 셀
+
+        self.set_risk_layers()
 
     # ── 좌표 변환 (셀 크기 반영) ──────────────────────────
     def world_to_grid(self, position, clamp=False):
@@ -328,14 +332,15 @@ class RiskDStarPlanner(DStarPlanner):
                     )
                     ax.add_patch(patch)
 
-            for x,z in self.movable_enemy_tank:
-                patch = Rectangle(
-                    ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
-                    1.0, 1.0,
-                    facecolor='purple', 
-                    alpha=0.5,
-                )
-                ax.add_patch(patch)
+            if self.is_enemy:
+                for x,z in self.movable_enemy_tank:
+                    patch = Rectangle(
+                        ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
+                        1.0, 1.0,
+                        facecolor='purple', 
+                        alpha=0.5,
+                    )
+                    ax.add_patch(patch)
     
             if active_path:
                 px = [point[0] for point in active_path]

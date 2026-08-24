@@ -104,7 +104,10 @@ class DStarPlanner:
         clearance_radius=8.0,
         clearance_weight=4.0,
         clearance_decay=2.5,
+        is_enemy=False
     ):
+        self.is_enemy = is_enemy
+
         self.width = int(width)
         self.height = int(height)
         self.allow_diagonal = bool(allow_diagonal)
@@ -127,6 +130,8 @@ class DStarPlanner:
 
         # 움직일 수 있는 적 전차에 대한 변수
         self.movable_enemy_tank: Set[GridNode] = set([])
+
+        self.is_enemy = False
 
         # 각 자유 셀의 장애물 근접 추가 비용. 값이 없으면 추가 비용 0.
         self.clearance_costs: Dict[GridNode, float] = {}
@@ -224,7 +229,10 @@ class DStarPlanner:
 
     def is_free(self, node):
         # return self.in_bounds(node) and node not in self.obstacles and node not in self.high
-        return self.in_bounds(node) and node not in self.obstacles and node not in self.movable_enemy_tank
+        if self.is_enemy:
+            return self.in_bounds(node) and node not in self.obstacles
+        else:
+            return self.in_bounds(node) and node not in self.obstacles and node not in self.movable_enemy_tank
 
     def heuristic(self, a, b):
         dx = abs(a[0] - b[0])
@@ -657,25 +665,16 @@ class DStarPlanner:
         # self.movable_enemy_tank
         # 움직일 수 있는 적 전차 위치에 대한 변수 업데이트
         if latest_info != None:
-            cx, cz = latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]
-            body_angle = latest_info["enemyBodyX"]
-            turret_angle = latest_info["enemyTurretX"]
+            self.movable_enemy_tank= set([])
+            enmey_pos = self.world_to_grid((latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]), clamp=True)
+            min_x = max(enmey_pos[0]-30, 0)
+            max_x = min(enmey_pos[0]+30, 300)
+            min_z = max(enmey_pos[1]-30, 0)
+            max_z = min(enmey_pos[1]+30, 300)
 
-            body_corners = self.get_bb_corners(cx, cz, 3.303, 6.339, body_angle)
-            turret_corners = self.get_bb_corners(cx, cz, 2.681, 2.822, turret_angle)
-
-            body_tiles = self.get_occupied_space(body_corners)
-            turret_tiles = self.get_occupied_space(turret_corners)
-
-            base_enemy_space = body_tiles.union(turret_tiles)
-
-            padded_enemy_space = set()
-            for x, z in base_enemy_space:
-                for dx in [-1, 0, 1]:
-                    for dz in [-1, 0, 1]:
-                        padded_enemy_space.add((x + dx, z + dz))
-
-            self.movable_enemy_tank = padded_enemy_space
+            for x in range(min_x, max_x):
+                for z in range(min_z, max_z):
+                    self.movable_enemy_tank.add((x,z))
 
         start = self.world_to_grid(current_pos, clamp=True)
         goal = self.world_to_grid(dest, clamp=True)
