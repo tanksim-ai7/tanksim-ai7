@@ -796,6 +796,281 @@ class TankDriveController:
             integral_max=30.0,
         )
 
+        # --------------------------------------------------------
+        # 자체 인지(우리 쪽 파이프라인) 기반 회피/후퇴용 상태
+        # --------------------------------------------------------
+        # vehicle_mode:
+        #   'advance' -> 평소 상태. get_action()이 매 tick grid 변화에 따라
+        #                D* Lite 전진 재탐색을 돌린다.
+        #   'retreat' -> 후퇴 중. 전진 재탐색을 멈추고 retreat 경로를
+        #                self.current_path에 넣은 채 그대로 추종한다.
+        #                목표(retreat 경로의 마지막 점)에 가까워지면
+        #                자동으로 'advance'로 복귀한다.
+        self.vehicle_mode = 'advance'
+
+        # 실제로 지나온 world 좌표 breadcrumb. 후퇴 경로의 재료가 된다.
+        # self.current_path는 항상 '미래로 갈 경로'만 들고 있어서 과거 이동
+        # 기록이 따로 없기 때문에 이 리스트를 새로 둔다.
+        self.position_history: List[PointXZ] = []
+        self._history_min_step_m = 3.0    # 이 거리 이상 움직였을 때만 기록 (노이즈/중복 방지)
+        self._history_max_points = 300    # 무한정 쌓이지 않게 상한
+        # 한 번 후퇴할 때 되돌아갈 거리.
+        # set_obstacles()의 obj_type별 padding 반경(예: enemy_tank는
+        # grid 49칸)보다 짧으면 breadcrumb을 아무리 되짚어도 여전히
+        # 패딩 구역 안이라 안전한 구간을 못 찾고 강제 재탐색으로 빠진다.
+        # 실제 cell_size(격자 1칸당 미터 수)를 곱해서 padding 반경보다
+        # 확실히 크게 잡아야 한다 — 이 값은 시작점일 뿐이니 실제 맵/
+        # cell_size 기준으로 다시 튜닝해야 한다.
+        self._retreat_distance_m = 60.0
+        self._retreat_arrival_tolerance_m = 3.0  # 후퇴 목표점에 이만큼 가까워지면 후퇴 종료
+
+    # --------------------------------------------------------
+    # 자체 인지(우리 쪽 파이프라인) 기반 회피/후퇴
+    # --------------------------------------------------------
+
+    def _record_position_history(
+        self,
+        current_xz: Optional[Sequence[float]],
+    ) -> None:
+        """
+        get_action()이 매 tick 호출한다.
+        일정 거리 이상 움직였을 때만 breadcrumb을 남긴다.
+        """
+        if current_xz is None:
+            return
+
+        current_xz = (float(current_xz[0]), float(current_xz[1]))
+
+        if not self.position_history:
+            self.position_history.append(current_xz)
+            return
+
+        last = self.position_history[-1]
+
+        if math.hypot(
+            current_xz[0] - last[0],
+            current_xz[1] - last[1],
+        ) >= self._history_min_step_m:
+            self.position_history.append(current_xz)
+
+            if len(self.position_history) > self._history_max_points:
+                self.position_history.pop(0)
+
+    def _check_retreat_arrival(
+        self,
+        current_position: Optional[Sequence[float]],
+    ) -> None:
+        """
+        후퇴 목표점(retreat 경로의 마지막 점)에 충분히 가까워졌는지 확인하고,
+        가까워졌으면 advance 모드로 복귀시켜 다음 tick부터 다시 목적지를
+        향해 전진 재탐색하게 한다.
+        """
+        if (
+            self.vehicle_mode != 'retreat'
+            or not self.current_path
+            or current_position is None
+        ):
+            return
+
+        retreat_target = self.current_path[-1]
+
+        dist_to_retreat_target = math.hypot(
+            retreat_target[0] - current_position[0],
+            retreat_target[1] - current_position[1],
+        )
+
+        if dist_to_retreat_target <= self._retreat_arrival_tolerance_m:
+            self.vehicle_mode = 'advance'
+
+            # retreat 중 그대로 유지되던 D* Lite 재계획 추적 상태를 지워서
+            # 다음 get_action() tick이 grid 변화 여부와 무관하게 무조건
+            # 한 번 새로 전진 경로를 계산하도록 만든다.
+            with self.planner_lock:
+                if hasattr(self.planner, "reset_replan_tracking"):
+                    self.planner.reset_replan_tracking()
+
+                if self.dest is not None:
+                    try:
+                        self.current_path = self.planner.find_path(
+                            current_position,
+                            self.dest,
+                            self.latest_info,
+                        )
+                    except ValueError as exc:
+                        print(
+                            "D* Lite 후퇴->전진 복귀 재계획 실패:",
+                            exc,
+                        )
+                        self.current_path = []
+
+            # 후퇴 경로 추종 중 쌓인 조향/속도 PID 오차가 새 전진 경로에
+            # 그대로 이어지면 튀는 값이 나올 수 있어 초기화한다.
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+
+    def _build_retreat_path(
+        self,
+        retreat_distance_m: Optional[float] = None,
+    ) -> Optional[List[PointXZ]]:
+        """
+        position_history를 거꾸로 따라가는 후퇴 경로를 만든다.
+        이미 한 번 통과해서 안전이 검증된 구간이므로 D* Lite 재탐색 없이 바로
+        쓸 수 있지만, 그 사이 또 다른 오브젝트가 잡혔을 수 있으니 구간마다
+        다시 통행 가능 여부를 검사하며 안전한 만큼만 잘라서 반환한다.
+
+        planner_lock을 이미 잡고 있는 컨텍스트에서만 호출한다.
+        (self.planner_lock은 RLock이라 같은 스레드에서 재진입해도 안전하다.)
+        """
+        if retreat_distance_m is None:
+            retreat_distance_m = self._retreat_distance_m
+
+        if len(self.position_history) < 2:
+            return None
+
+        raw = [self.position_history[-1]]
+        accumulated = 0.0
+
+        for i in range(len(self.position_history) - 2, -1, -1):
+            p_prev = self.position_history[i + 1]
+            p_curr = self.position_history[i]
+
+            accumulated += math.hypot(
+                p_curr[0] - p_prev[0],
+                p_curr[1] - p_prev[1],
+            )
+
+            raw.append(p_curr)
+
+            if accumulated >= retreat_distance_m:
+                break
+
+        safe = [raw[0]]
+
+        for p1, p2 in zip(raw, raw[1:]):
+            if not self.planner._is_straight_line_walkable(p1, p2):
+                break
+
+            safe.append(p2)
+
+        return safe if len(safe) >= 2 else None
+
+    def handle_object_detected(
+        self,
+        x_min: float,
+        x_max: float,
+        z_min: float,
+        z_max: float,
+        obj_type: str = 'enemy_tank',
+    ) -> Dict[str, Any]:
+        """
+        우리 쪽 인지 파이프라인(팀원 작업, world 좌표 확보 후)이 직접 호출하는
+        진입점. Flask 라우트가 아니라 일반 메서드라서:
+
+            drive_controller.handle_object_detected(40, 46, 100, 106, obj_type='enemy_tank')
+
+        처리 순서:
+            1) 오브젝트 패딩 처리 (planner.pad_object)
+            2) 그로 인해 지금 self.current_path가 막혔는지 판단 (planner.is_path_blocked)
+            3-a) 안 막혔으면 -> 아무것도 안 하고 그대로 진행
+            3-b) 막혔으면 -> 현재 위치가 그 패딩(통행 불가 셀) 위에 서 있는지 판단
+                 - 서 있음   -> 후퇴 모드로 전환, retreat 경로로 self.current_path 교체
+                 - 안 서 있음 -> 전진 방향으로 강제 재탐색해서 self.current_path 교체,
+                                 advance 모드 유지
+
+        Returns
+        -------
+        dict: 상태 설명용. 서버/호출부가 로깅 등에 참고만 하면 된다.
+        """
+        current_position = self.current_pos
+        destination_xz = self.dest
+
+        if current_position is None or destination_xz is None:
+            return {"status": "skipped", "reason": "position/destination not ready"}
+
+        with self.planner_lock:
+            changed_cells = self.planner.pad_object(
+                x_min, x_max, z_min, z_max, obj_type,
+            )
+
+            # current_path가 이미 비어있는 상태(예: 직전 재탐색 실패로 멈춰있는
+            # 상황)도 '막힘'으로 간주해야 한다 — 그렇지 않으면 is_path_blocked()가
+            # 빈 리스트에 대해 False를 반환해서 멈춰있는 차량을 그대로 방치한다.
+            blocked = (
+                not self.current_path
+                or self.planner.is_path_blocked(self.current_path)
+            )
+
+            if not blocked:
+                return {
+                    "status": "clear",
+                    "path_blocked": False,
+                    "changed_cells": len(changed_cells or []),
+                }
+
+            current_grid = self.planner.world_to_grid(
+                current_position, clamp=True,
+            )
+            standing_on_blocked_cell = not self.planner.is_free(current_grid)
+
+            if standing_on_blocked_cell:
+                retreat_path = self._build_retreat_path()
+
+                if retreat_path is None:
+                    # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
+                    # 그 자리에서 강제 재탐색을 시도한다.
+                    #
+                    # 이 분기에 들어왔다는 것 자체가 "지금 서 있는 셀이 막혀
+                    # 있다"는 뜻이라 find_path()를 그대로 부르면 시작점 검증에서
+                    # 무조건 ValueError가 난다. 그래서 clear_start_area()로
+                    # 반경을 넓혀가며 실제로 뚫어주는 _find_path_with_recovery()를
+                    # 써야 한다. (단, latest_info 기반 적 전차 마스킹은 이 경로에서
+                    # 지원되지 않는다 — _find_path_with_recovery가 내부적으로
+                    # find_path(pos, dest)를 latest_info 없이 호출하기 때문.)
+                    new_path = self.planner._find_path_with_recovery(
+                        current_position, destination_xz,
+                    )
+
+                    self.current_path = new_path or []
+                    self.vehicle_mode = 'advance'
+                    self.speed_pid.reset()
+                    self.steering_pid.reset()
+
+                    return {
+                        "status": "forced_replan_no_history",
+                        "path_blocked": True,
+                        "changed_cells": len(changed_cells or []),
+                    }
+
+                self.current_path = retreat_path
+                self.vehicle_mode = 'retreat'
+                self.speed_pid.reset()
+                self.steering_pid.reset()
+
+                return {
+                    "status": "retreating",
+                    "path_blocked": True,
+                    "changed_cells": len(changed_cells or []),
+                    "retreat_points": len(retreat_path),
+                }
+
+            else:
+                try:
+                    new_path = self.planner.find_path(
+                        current_position, destination_xz, self.latest_info,
+                    )
+                except ValueError as exc:
+                    print("D* Lite 강제 재탐색 실패:", exc)
+                    new_path = []
+
+                self.current_path = new_path or []
+                self.vehicle_mode = 'advance'
+
+                return {
+                    "status": "replanned",
+                    "path_blocked": True,
+                    "changed_cells": len(changed_cells or []),
+                }
+
     # --------------------------------------------------------
     # 내부 상태 관리
     # --------------------------------------------------------
@@ -1210,6 +1485,11 @@ class TankDriveController:
 
         self.current_path = []
 
+        # 새 episode에서는 이전 episode의 breadcrumb/후퇴 상태가
+        # 섞이지 않도록 항상 advance로 초기화한다.
+        self.vehicle_mode = 'advance'
+        self.position_history = []
+
         self._reset_control_state(
             reset_destination_signature=True,
         )
@@ -1266,6 +1546,9 @@ class TankDriveController:
             float(x),
             float(z),
         ]
+
+        # 새 목적지가 들어오면 후퇴 중이었더라도 전진 상태로 복귀한다.
+        self.vehicle_mode = 'advance'
 
         self._reset_control_state(
             reset_destination_signature=True,
@@ -1498,6 +1781,11 @@ class TankDriveController:
             self.current_pos is not None
             and self.dest is not None
         ):
+            # Unity 쪽 /update_obstacle로 전체 장애물 목록이 새로 온 경우이므로
+            # 자체 인지 기반 후퇴 중이었더라도 전진 상태로 복귀해 새 맵 기준으로
+            # 다시 계획한다.
+            self.vehicle_mode = 'advance'
+
             try:
                 with self.planner_lock:
                     self.current_path = self.planner.find_path(
@@ -1979,6 +2267,11 @@ class TankDriveController:
             pos_z,
         ]
 
+        # 자체 인지 기반 회피/후퇴 상태 갱신.
+        # dest가 아직 없어도 breadcrumb 자체는 계속 쌓아 둔다.
+        self._record_position_history(self.current_pos)
+        self._check_retreat_arrival(self.current_pos)
+
         if self.dest is None:
             self.speed_pid.reset()
             self.steering_pid.reset()
@@ -2076,9 +2369,15 @@ class TankDriveController:
             )
 
             # 현재 복구된 서버와 동일하게 grid가 바뀌면 경로를 다시 계산한다.
+            # 단, 후퇴 중(vehicle_mode == 'retreat')에는 grid가 바뀌어도
+            # 전진 재탐색을 하지 않는다 -> retreat 경로가 그대로 유지된다.
+            # (전진 복귀는 _check_retreat_arrival()이 도착 시점에 처리한다.)
             if (
-                old_grid != new_grid
-                or not self.current_path
+                self.vehicle_mode == 'advance'
+                and (
+                    old_grid != new_grid
+                    or not self.current_path
+                )
             ):
                 with self.planner_lock:
                     self.current_path = (
