@@ -1473,7 +1473,11 @@ class DStarPlanner:
         if show_grid:
             ax.grid(True, alpha=0.3)
 
-        ax.legend()
+        # loc='best'(기본값)는 obstacle_rectangles 수백 개 + imshow 전체를
+        # 상대로 겹치지 않는 위치를 전수 탐색해서 실제로 수십 초 이상
+        # 걸릴 수 있다(legend에 'Creating legend with loc="best" can be
+        # slow' 경고가 뜨는 이유). 위치를 고정해서 그 탐색 자체를 없앤다.
+        ax.legend(loc='upper right')
         fig.tight_layout()
 
         if save_path:
@@ -1597,7 +1601,11 @@ class DStarPlanner:
         if show_grid:
             ax.grid(True, alpha=0.3)
 
-        ax.legend()
+        # loc='best'(기본값)는 obstacle_rectangles 수백 개 + imshow 전체를
+        # 상대로 겹치지 않는 위치를 전수 탐색해서 실제로 수십 초 이상
+        # 걸릴 수 있다(legend에 'Creating legend with loc="best" can be
+        # slow' 경고가 뜨는 이유). 위치를 고정해서 그 탐색 자체를 없앤다.
+        ax.legend(loc='upper right')
         fig.tight_layout()
 
         if save_path:

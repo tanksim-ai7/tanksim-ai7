@@ -30,8 +30,39 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.colors import to_rgba
 
 from move.dstar_lite_planner_cost import DStarPlanner, INF
+
+
+def _cells_to_rgba_overlay(width, height, layers):
+    """
+    grid 셀 set을 개별 matplotlib Patch로 하나씩 그리면(add_patch 수만 번)
+    _update_patch_limits/get_tightbbox 같은 patch별 부기 작업이 누적돼서
+    셀 수가 만 단위만 돼도 렌더링이 수십 초씩 걸린다(실측: obstacle_rectangles
+    296개 자체보다, 그걸 padding한 결과인 self.obstacles grid 셀 2만여 개를
+    patch로 그리는 쪽이 지배적인 병목이었다).
+
+    이 함수는 여러 셀 set을 (색상, 알파) 레이어로 받아 RGBA 이미지 배열
+    하나로 합쳐서 반환한다. imshow() 한 번으로 그리면 셀 개수와 무관하게
+    상수 시간에 가깝게 그려진다.
+
+    layers: [(cell_set, (r, g, b, a)), ...] 순서대로 그려서 뒤에 오는
+            레이어가 겹치는 셀을 덮어쓴다.
+    """
+    rgba = np.zeros((height, width, 4), dtype=np.float32)
+
+    for cells, color in layers:
+        if not cells:
+            continue
+
+        r, g, b, a = color
+
+        for x, z in cells:
+            if 0 <= x < width and 0 <= z < height:
+                rgba[z, x] = (r, g, b, a)
+
+    return rgba
 
 
 class RiskDStarPlanner(DStarPlanner):
@@ -273,25 +304,25 @@ class RiskDStarPlanner(DStarPlanner):
                 zorder=1
             )
 
-            for x,z in self.terrain_blocked:
-                rect_grid = plt.Rectangle(
-                    ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
-                    1.0, 1.0,
-                    facecolor='magenta', 
-                    edgecolor='none', 
-                    alpha=0.3, # 다른 표시와 겹쳐도 다 보이도록 투명도 설정
-                    zorder=2
-                )
-                ax.add_patch(rect_grid)
-            ax.plot([], [], color='magenta', alpha=0.3, label="Blocked Terrain", linestyle='-', linewidth=5)
-    
-            for x,z in self.obstacles:
-                patch = Rectangle(
-                    ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
-                    1.0, 1.0,
-                    alpha=0.5,
-                )
-                ax.add_patch(patch)
+            # grid 셀 단위 마킹(terrain_blocked/obstacles)은 patch를 셀마다
+            # 하나씩 그리면(수만 개) 렌더링이 급격히 느려지므로, RGBA
+            # 이미지 오버레이 한 번으로 합쳐서 그린다.
+            cell_overlay = _cells_to_rgba_overlay(
+                self.width, self.height,
+                [
+                    (self.terrain_blocked, to_rgba('magenta', alpha=0.3)),
+                    (self.obstacles, to_rgba('#1f77b4', alpha=0.5)),
+                    (self.movable_enemy_tank, to_rgba('purple', alpha=0.5)),
+                ],
+            )
+            ax.imshow(
+                cell_overlay,
+                origin='lower',
+                extent=[0, self.width, 0, self.height],
+                zorder=2,
+            )
+            if self.terrain_blocked:
+                ax.plot([], [], color='magenta', alpha=0.3, label="Blocked Terrain", linestyle='-', linewidth=5)
 
             for obs in self.obstacle_rectangles:
                 patch = Rectangle(
@@ -303,37 +334,27 @@ class RiskDStarPlanner(DStarPlanner):
                 ax.add_patch(patch)
     
                 color = '#228B22'
-                for obs in self.obstacle_rectangles:
-                    if obs.type == 'nature':
-                        color = '#228B22'
-                    elif obs.type == 'unknown':
-                        color = '#000000'
-                    elif obs.type == 'enemy_tank':
-                        color = '#800020'
-                    elif obs.type == 'enemy':
-                        color = '#FF8C00'
-                    elif obs.type == 'team':
-                        color = '#8A2BE2'
-                    elif obs.type == 'team_tank':
-                        color = '#000080'
+                if obs.type == 'nature':
+                    color = '#228B22'
+                elif obs.type == 'unknown':
+                    color = '#000000'
+                elif obs.type == 'enemy_tank':
+                    color = '#800020'
+                elif obs.type == 'enemy':
+                    color = '#FF8C00'
+                elif obs.type == 'team':
+                    color = '#8A2BE2'
+                elif obs.type == 'team_tank':
+                    color = '#000080'
     
-                    patch = Rectangle(
-                        (
-                            obs.x_min - self.obstacle_margin,
-                            obs.z_min - self.obstacle_margin,
-                        ),
-                        (obs.x_max - obs.x_min) + 2 * self.obstacle_margin,
-                        (obs.z_max - obs.z_min) + 2 * self.obstacle_margin,
-                        facecolor=color, 
-                    )
-                    ax.add_patch(patch)
-
-            for x,z in self.movable_enemy_tank:
                 patch = Rectangle(
-                    ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
-                    1.0, 1.0,
-                    facecolor='purple', 
-                    alpha=0.5,
+                    (
+                        obs.x_min - self.obstacle_margin,
+                        obs.z_min - self.obstacle_margin,
+                    ),
+                    (obs.x_max - obs.x_min) + 2 * self.obstacle_margin,
+                    (obs.z_max - obs.z_min) + 2 * self.obstacle_margin,
+                    facecolor=color, 
                 )
                 ax.add_patch(patch)
     
@@ -374,7 +395,7 @@ class RiskDStarPlanner(DStarPlanner):
             if show_grid:
                 ax.grid(True, alpha=0.3)
     
-            ax.legend()
+            ax.legend(loc='upper right')  # loc='best' 전수탐색이 느려서 고정
             fig.tight_layout()
     
             if save_path:
@@ -401,6 +422,8 @@ class RiskDStarPlanner(DStarPlanner):
         active_path = list(self.last_path if path is None else path)
         terrain_blocked_snapshot = set(getattr(self, "terrain_blocked", set()))
         obstacle_rectangles_snapshot = list(self.obstacle_rectangles)
+        obstacles_snapshot = set(self.obstacles)
+        movable_enemy_tank_snapshot = set(self.movable_enemy_tank)
         start_snapshot = self.start
         goal_snapshot = self.goal
         obstacle_margin_snapshot = self.obstacle_margin
@@ -411,6 +434,8 @@ class RiskDStarPlanner(DStarPlanner):
                 active_path,
                 terrain_blocked_snapshot,
                 obstacle_rectangles_snapshot,
+                obstacles_snapshot,
+                movable_enemy_tank_snapshot,
                 start_snapshot,
                 goal_snapshot,
                 obstacle_margin_snapshot,
@@ -423,6 +448,7 @@ class RiskDStarPlanner(DStarPlanner):
         thread.start()
 
     def _render_and_save(self, active_path, terrain_blocked, obstacle_rectangles,
+                          obstacles, movable_enemy_tank,
                           start, goal, obstacle_margin, show_grid, title, save_path):
         """
         plot_async()가 뜬 스냅샷으로 실제 렌더링을 수행한다.
@@ -447,25 +473,22 @@ class RiskDStarPlanner(DStarPlanner):
             zorder=1,
         )
 
-        for x, z in terrain_blocked:
-            rect_grid = Rectangle(
-                ((x + 0.5) - 0.5, (z + 0.5) - 0.5),
-                1.0, 1.0,
-                facecolor='magenta',
-                edgecolor='none',
-                alpha=0.3,
-                zorder=2,
-            )
-            ax.add_patch(rect_grid)
-        ax.plot([], [], color='magenta', alpha=0.3, label="Blocked Terrain", linestyle='-', linewidth=5)
-
-        for x,z in self.obstacles:
-            patch = Rectangle(
-                ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
-                1.0, 1.0,
-                alpha=0.5,
-            )
-            ax.add_patch(patch)
+        cell_overlay = _cells_to_rgba_overlay(
+            self.width, self.height,
+            [
+                (terrain_blocked, to_rgba('magenta', alpha=0.3)),
+                (obstacles, to_rgba('#1f77b4', alpha=0.5)),
+                (movable_enemy_tank, to_rgba('purple', alpha=0.5)),
+            ],
+        )
+        ax.imshow(
+            cell_overlay,
+            origin='lower',
+            extent=[0, self.width, 0, self.height],
+            zorder=2,
+        )
+        if terrain_blocked:
+            ax.plot([], [], color='magenta', alpha=0.3, label="Blocked Terrain", linestyle='-', linewidth=5)
 
         for obs in obstacle_rectangles:
             patch = Rectangle(
@@ -477,30 +500,29 @@ class RiskDStarPlanner(DStarPlanner):
             ax.add_patch(patch)
 
             color = '#228B22'
-            for obs in self.obstacle_rectangles:
-                if obs.type == 'nature':
-                    color = '#228B22'
-                elif obs.type == 'unknown':
-                    color = '#000000'
-                elif obs.type == 'enemy_tank':
-                    color = '#800020'
-                elif obs.type == 'enemy':
-                    color = '#FF8C00'
-                elif obs.type == 'team':
-                    color = '#8A2BE2'
-                elif obs.type == 'team_tank':
-                    color = '#000080'
+            if obs.type == 'nature':
+                color = '#228B22'
+            elif obs.type == 'unknown':
+                color = '#000000'
+            elif obs.type == 'enemy_tank':
+                color = '#800020'
+            elif obs.type == 'enemy':
+                color = '#FF8C00'
+            elif obs.type == 'team':
+                color = '#8A2BE2'
+            elif obs.type == 'team_tank':
+                color = '#000080'
 
-                patch = Rectangle(
-                    (
-                        obs.x_min - self.obstacle_margin,
-                        obs.z_min - self.obstacle_margin,
-                    ),
-                    (obs.x_max - obs.x_min) + 2 * self.obstacle_margin,
-                    (obs.z_max - obs.z_min) + 2 * self.obstacle_margin,
-                    facecolor=color, 
-                )
-                ax.add_patch(patch)
+            patch = Rectangle(
+                (
+                    obs.x_min - obstacle_margin,
+                    obs.z_min - obstacle_margin,
+                ),
+                (obs.x_max - obs.x_min) + 2 * obstacle_margin,
+                (obs.z_max - obs.z_min) + 2 * obstacle_margin,
+                facecolor=color, 
+            )
+            ax.add_patch(patch)
 
         if active_path:
             px = [point[0] for point in active_path]
@@ -524,7 +546,7 @@ class RiskDStarPlanner(DStarPlanner):
         if show_grid:
             ax.grid(True, alpha=0.3)
 
-        ax.legend()
+        ax.legend(loc='upper right')  # loc='best' 전수탐색이 느려서 고정
         fig.tight_layout()
 
         if save_path:

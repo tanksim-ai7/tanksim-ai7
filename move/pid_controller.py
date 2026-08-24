@@ -1830,15 +1830,28 @@ class TankDriveController:
         """
         현재 D* Lite obstacle/path 상태를 PNG로 저장한다.
 
+        주의:
+            planner.plot()(동기/blocking)이 아니라 plot_async()를 쓴다.
+            plot()은 matplotlib legend(loc='best')가 obstacle_rectangles
+            수백 개 + 90000픽셀 imshow를 상대로 '겹치지 않는 위치'를
+            전수 탐색하느라 실제로 수십 초~분 단위로 걸릴 수 있는데,
+            이 함수가 apply_destination()/handle_update_obstacles() 안에서
+            request 처리 스레드를 그대로 막고 있어서(게다가
+            planner_lock까지 잡은 채로) 목적지 설정/장애물 갱신 응답
+            자체가 오래 걸리는 원인이었다. plot_async()는 그리는 데
+            필요한 데이터만 스냅샷 떠서 별도 데몬 스레드에 넘기고
+            즉시 리턴하므로 요청 스레드를 막지 않는다.
+
         Args:
             title:
                 plot 제목.
 
         Returns:
-            저장된 map 이미지 파일 경로.
+            저장될 예정인 map 이미지 파일 경로. plot_async()는 비동기라
+            이 시점에는 아직 파일이 안 만들어져 있을 수 있다.
         """
         with self.planner_lock:
-            self.planner.plot(
+            self.planner.plot_async(
                 path=(
                     self.current_path
                     if self.current_path
@@ -1847,7 +1860,6 @@ class TankDriveController:
                 show_grid=True,
                 title=title,
                 save_path=self.map_image_path,
-                show=False,
             )
 
         return self.map_image_path
@@ -1856,15 +1868,29 @@ class TankDriveController:
         """
         /path_map endpoint에서 send_file에 넘길 map 이미지 경로를 반환한다.
 
+        render_map()은 이제 비동기라 파일이 아직 안 만들어졌을 수 있다.
+        여긴 사람이 브라우저로 이미지를 열어보는 디버그용 endpoint라
+        핫패스(주행 루프)와 달리 한 번쯤 느려도 괜찮으므로, 파일이 아예
+        없는 최초 1회에 한해 동기 plot()으로 확실히 만들어서 돌려준다.
+
         Returns:
             map PNG 경로.
         """
         if not Path(
             self.map_image_path
         ).exists():
-            self.render_map(
-                "D* Lite Map"
-            )
+            with self.planner_lock:
+                self.planner.plot(
+                    path=(
+                        self.current_path
+                        if self.current_path
+                        else None
+                    ),
+                    show_grid=True,
+                    title="D* Lite Map",
+                    save_path=self.map_image_path,
+                    show=False,
+                )
 
         return self.map_image_path
 
