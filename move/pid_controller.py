@@ -1626,18 +1626,41 @@ class TankDriveController:
                 float,
                 data["destination"].split(","),
             )
+        except Exception as exc:
+            # 좌표 파싱 자체가 실패한 경우(콤마 개수, 숫자 변환 등)만
+            # "Invalid format"으로 분류한다.
+            return {
+                "status": "ERROR",
+                "message": f"Invalid format: {str(exc)}",
+            }, 400
 
+        try:
             return self.apply_destination(
                 x,
                 y,
                 z,
             ), 200
 
-        except Exception as exc:
+        except ValueError as exc:
+            # apply_destination() -> find_path()가 던지는 ValueError는
+            # 좌표 형식 문제가 아니라 "시작점/목적지가 장애물(패딩 포함)에
+            # 막혀서 경로를 못 만든다"는 뜻이다(혹은 아직 /info를 못 받아
+            # current_pos가 없는 경우). 원인을 구분해서 응답하고 서버
+            # 콘솔에도 그대로 남겨서 디버깅이 가능하게 한다.
+            print(f"[/set_destination] 경로 계산 실패: {exc}")
             return {
                 "status": "ERROR",
-                "message": f"Invalid format: {str(exc)}",
+                "message": f"Path planning failed: {str(exc)}",
             }, 400
+
+        except Exception as exc:
+            # 그 외 예상 못한 예외는 원인을 감추지 않고 traceback까지 남긴다.
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "ERROR",
+                "message": f"Unexpected error: {str(exc)}",
+            }, 500
 
     # --------------------------------------------------------
     # D* Lite obstacle / map 관리
