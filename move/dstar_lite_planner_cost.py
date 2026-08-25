@@ -595,7 +595,7 @@ class DStarPlanner:
 
         return unique_path
 
-    def get_occupied_space(corners):
+    def get_occupied_space(self, corners):
         """
         4개의 꼭짓점(실수 좌표) 내부 및 경계선에 위치한 모든 정수 격자 좌표(x, z)를 set으로 반환합니다.
         """
@@ -633,7 +633,7 @@ class DStarPlanner:
                     
         return occupied
 
-    def get_bb_corners(cx, cz, width, height, angle_degrees):
+    def get_bb_corners(self, cx, cz, width, height, angle_degrees):
         rad = math.radians(angle_degrees)
         cos_a = math.cos(rad)
         sin_a = math.sin(rad)
@@ -834,6 +834,108 @@ class DStarPlanner:
     # --------------------------------------------------
     # 재계획 / 재플롯 판단 (서버 쪽 상태 관리를 없애기 위한 래퍼)
     # --------------------------------------------------
+
+    def pad_object(
+        self,
+        x_min, x_max, z_min, z_max,
+        obj_type='enemy_tank',
+        dedupe_radius_m=None,
+    ):
+        """
+        Unity의 /update_obstacle 콜백과 무관하게, 우리 쪽 인지 파이프라인이
+        직접 확보한 오브젝트 world 좌표를 맵에 추가로 패딩 처리한다.
+
+        set_obstacles()는 넘겨받은 리스트로 obstacle_rectangles 전체를
+        교체하는 방식이라, 기존 목록에 이번 오브젝트만 append한 뒤
+        다시 통째로 넘겨서 '추가' 효과를 낸다.
+
+        중복 방지(dedupe):
+            인식 파이프라인은 같은 오브젝트를 프레임마다 계속 다시
+            보내주므로, 매번 무조건 append하면 obstacle_rectangles가
+            무한정 늘어나 set_obstacles() 호출(=Dijkstra 재계산)이
+            점점 느려진다.
+
+            그래서 같은 obj_type의 기존 rect 중 "중심이 dedupe_radius_m
+            이내로 가까운" 것이 있으면 새로 추가하지 않고, 그 rect를
+            이번 좌표로 '갱신'한다(오브젝트가 살짝 움직였을 수 있으니
+            최신 좌표를 반영). 진짜 새 오브젝트로 봐야 하면(다른 type,
+            또는 멀리 떨어진 같은 type) 새로 append된다.
+
+            트래킹 ID를 인식 파이프라인에서 넘겨줄 수 있게 되면, 거리
+            기반 추정보다 ID 기반 매칭이 훨씬 정확하니 그쪽으로
+            바꾸는 걸 권장한다.
+
+        Parameters
+        ----------
+        dedupe_radius_m : float, optional
+            같은 오브젝트로 볼 중심 간 거리 기준 [m]. 생략하면 이번에
+            들어온 바운딩 박스의 대각선 길이를 기준으로 삼는다(오브젝트
+            크기에 비례해서 자연스럽게 커지도록).
+
+        Returns
+        -------
+        set[GridNode]
+            이번 호출로 실제로 통행 가능/불가 상태가 바뀐 grid 셀들.
+        """
+        x_min, x_max = min(x_min, x_max), max(x_min, x_max)
+        z_min, z_max = min(z_min, z_max), max(z_min, z_max)
+
+        new_cx = (x_min + x_max) / 2.0
+        new_cz = (z_min + z_max) / 2.0
+
+        if dedupe_radius_m is None:
+            # 바운딩 박스 대각선 길이의 절반 정도를 기준으로 잡는다.
+            # 너무 좁으면(고정값) 큰 오브젝트가 프레임마다 조금씩 흔들려
+            # 잡힐 때 다른 오브젝트로 오인해서 계속 append될 수 있고,
+            # 너무 넓으면 실제로 가까이 있는 서로 다른 오브젝트 둘을
+            # 하나로 합쳐버릴 수 있다.
+            dedupe_radius_m = math.hypot(x_max - x_min, z_max - z_min) / 2.0
+
+        combined = list(self.obstacle_rectangles)
+        matched_index = None
+
+        for i, obs in enumerate(combined):
+            if obs.type != obj_type:
+                continue
+
+            obs_cx = (obs.x_min + obs.x_max) / 2.0
+            obs_cz = (obs.z_min + obs.z_max) / 2.0
+
+            if math.hypot(new_cx - obs_cx, new_cz - obs_cz) <= dedupe_radius_m:
+                matched_index = i
+                break
+
+        new_rect = ObstacleRect(
+            x_min=x_min, x_max=x_max,
+            z_min=z_min, z_max=z_max,
+            type=obj_type,
+        )
+
+        if matched_index is None:
+            combined.append(new_rect)
+        else:
+            # append가 아니라 '갱신' -> obstacle_rectangles 길이가
+            # 늘어나지 않는다.
+            combined[matched_index] = new_rect
+
+        return self.set_obstacles(combined)
+
+    def is_path_blocked(self, world_path):
+        """
+        world_path(waypoint 리스트)가 현재 obstacles/terrain_blocked 기준으로
+        여전히 통행 가능한지 검사한다.
+
+        world_path는 ultimate_one_pass_compression()이 만든 코너점만 남긴
+        희소한 리스트이므로, waypoint 자체가 아니라 waypoint '사이 직선 구간'을
+        _is_straight_line_walkable()로 재검사한다 (경로 압축과 동일 로직 재사용).
+        pad_object() 등으로 obstacles가 바뀐 '직후'에 호출해야 최신 상태를 반영한다.
+        """
+        if not world_path or len(world_path) < 2:
+            return False
+        return any(
+            not self._is_straight_line_walkable(p1, p2)
+            for p1, p2 in zip(world_path, world_path[1:])
+        )
 
     def reset_replan_tracking(self):
         """
