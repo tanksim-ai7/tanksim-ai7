@@ -216,8 +216,7 @@ def init():
 
 @app.route('/start', methods=['GET'])
 def start():
-    """simulator /start endpoint."""
-    return jsonify({"control": ""})
+    return jsonify({"control": "start"})
 
 
 if __name__ == '__main__':
