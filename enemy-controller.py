@@ -10,6 +10,10 @@ app = Flask(__name__)
 path_planner = DStarLitePlanner(is_enemy=True)
 drive_controller = TankDriveController(path_planner, "dstar_enemy_map.png")
 
+# (59.0, 280.0) => 첫 시작 위치
+# 나머지 => 순서대로 진행될 목적지 좌표
+ENEMY_DEST_LIST = [(59.0, 280.0), (60.0, 5.23), (285.0, 285.0)]
+ENEMY_DEST_IDX = 0
 
 tmp_flag = True
 
@@ -57,10 +61,16 @@ def info():
     data['playerBodyZ'] = data['enemyBodyZ']
 
     response, status = drive_controller.handle_info(data)
-    global tmp_flag
-    if tmp_flag:
-        tmp_flag = False
-        response, status = drive_controller.handle_set_destination(dest)
+    global ENEMY_DEST_IDX
+    if ENEMY_DEST_IDX < len(ENEMY_DEST_LIST):
+        if ENEMY_DEST_LIST[ENEMY_DEST_IDX][0]-1 <= data['playerPos']['x'] <=  ENEMY_DEST_LIST[ENEMY_DEST_IDX][0]+1 and\
+           ENEMY_DEST_LIST[ENEMY_DEST_IDX][1]-1 <= data['playerPos']['z'] <=  ENEMY_DEST_LIST[ENEMY_DEST_IDX][1]+1:
+
+                ENEMY_DEST_IDX += 1
+                dest = {
+                    "destination": f"{ENEMY_DEST_LIST[ENEMY_DEST_IDX][0]}, {data['playerPos']['y']}, {ENEMY_DEST_LIST[ENEMY_DEST_IDX][1]}"
+                }
+                response, status = drive_controller.handle_set_destination(dest)
 
     return jsonify(response)
 

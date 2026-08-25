@@ -665,10 +665,10 @@ class DStarPlanner:
         if latest_info != None:
             self.movable_enemy_tank= set([])
             enmey_pos = self.world_to_grid((latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]), clamp=True)
-            min_x = max(enmey_pos[0]-30, 0)
-            max_x = min(enmey_pos[0]+30, 300)
-            min_z = max(enmey_pos[1]-30, 0)
-            max_z = min(enmey_pos[1]+30, 300)
+            min_x = max(enmey_pos[0]-15, 0)
+            max_x = min(enmey_pos[0]+15, 300)
+            min_z = max(enmey_pos[1]-15, 0)
+            max_z = min(enmey_pos[1]+15, 300)
 
             for x in range(min_x, max_x):
                 for z in range(min_z, max_z):
