@@ -62,7 +62,7 @@ def info():
 
     response, status = drive_controller.handle_info(data)
     global ENEMY_DEST_IDX
-    if ENEMY_DEST_IDX < len(ENEMY_DEST_LIST):
+    if ENEMY_DEST_IDX < len(ENEMY_DEST_LIST)-1:
         if ENEMY_DEST_LIST[ENEMY_DEST_IDX][0]-1 <= data['playerPos']['x'] <=  ENEMY_DEST_LIST[ENEMY_DEST_IDX][0]+1 and\
            ENEMY_DEST_LIST[ENEMY_DEST_IDX][1]-1 <= data['playerPos']['z'] <=  ENEMY_DEST_LIST[ENEMY_DEST_IDX][1]+1:
 
