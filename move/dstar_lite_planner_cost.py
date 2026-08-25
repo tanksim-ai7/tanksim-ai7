@@ -130,6 +130,7 @@ class DStarPlanner:
 
         # 움직일 수 있는 적 전차에 대한 변수
         self.movable_enemy_tank: Set[GridNode] = set([])
+        self.last_enemy_tank: Set[GridNode] = set([])
 
         # 각 자유 셀의 장애물 근접 추가 비용. 값이 없으면 추가 비용 0.
         self.clearance_costs: Dict[GridNode, float] = {}
@@ -230,7 +231,7 @@ class DStarPlanner:
         if self.is_enemy:
             return self.in_bounds(node) and node not in self.obstacles
         else:
-            return self.in_bounds(node) and node not in self.obstacles and node not in self.movable_enemy_tank
+            return self.in_bounds(node) and node not in self.obstacles and node not in self.last_enemy_tank
 
     def heuristic(self, a, b):
         dx = abs(a[0] - b[0])
@@ -673,6 +674,16 @@ class DStarPlanner:
             for x in range(min_x, max_x):
                 for z in range(min_z, max_z):
                     self.movable_enemy_tank.add((x,z))
+
+            changed_cells = self.last_enemy_tank.symmetric_difference(self.movable_enemy_tank)
+            for node in changed_cells:
+                if self.in_bounds(node):
+                    self.update_vertex(node)
+                    for neighbor in self.get_neighbors(node):
+                        self.update_vertex(neighbor)
+
+            # 4. 다음 0.1초 뒤의 비교를 위해 현재 상태를 백업
+            self.last_enemy_tank = self.movable_enemy_tank.copy() 
 
         start = self.world_to_grid(current_pos, clamp=True)
         goal = self.world_to_grid(dest, clamp=True)
@@ -1166,6 +1177,9 @@ class DStarPlanner:
         서버 호출:
             changed_cells = planner.set_obstacles(obs_list)
         """
+        if len(list(obs_list)) == 0:
+            return
+        
         self.obstacle_rectangles = list(obs_list)
         new_obstacles = set()
 
