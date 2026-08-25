@@ -1,0 +1,12 @@
+ally-controller.py와 같은 폴더에 둡니다.
+
+ally-controller.py 파일에서 제일 아래 부분을 아래와 같이 수정합니다.
+if __name__ == '__main__':
+    from viz3d import attach_viz
+    attach_viz(app, fm=fm, drive=drive_controller, detect=tskijun)
+    # 기존 refactored 서버와 동일하게 병렬 Flask 요청을 허용한다.
+    app.run(host='0.0.0.0', port=5000, threaded=True)
+
+localhost:5000/view3d 접속하여 확인합니다.
+
+http://localhost:5000/state3d 에 접속해서 상태 확인 가능합니다.
