@@ -98,7 +98,11 @@ def extract_speed_from_info(data: Dict[str, Any]) -> Tuple[Optional[float], Opti
         if key in data and data[key] is not None:
             try:
                 # 후진 속도가 음수여도 속력의 크기만 사용하고 m/s -> km/h로 변환한다.
+<<<<<<< HEAD
                 return float(data[key]) * 3.6, key
+=======
+                return abs(float(data[key])) * 3.6, key
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
             except (TypeError, ValueError):
                 pass
 
@@ -493,7 +497,11 @@ def make_stop_command() -> Dict[str, Any]:
     }
 
 
+<<<<<<< HEAD
 def make_longitudinal_command(pid_output: float, signed_speed_kmh: Optional[float] = None) -> Dict[str, Any]:
+=======
+def make_longitudinal_command(pid_output: float) -> Dict[str, Any]:
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
     """
     속도 PID 출력을 W/S 명령으로 변환한다.
 
@@ -507,13 +515,17 @@ def make_longitudinal_command(pid_output: float, signed_speed_kmh: Optional[floa
     """
     # PID 출력이 아주 작을 때 W/S가 반복 전환되는 것을 막는 명령 deadband.
     deadband = 0.02
+<<<<<<< HEAD
     stop_speed = 1.0
+=======
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
 
     if pid_output > deadband:
         ws_command = "W"
         ws_weight = clamp(pid_output, 0.0, 1.0)
 
     elif pid_output < -deadband:
+<<<<<<< HEAD
 
         # signed speed를 아직 계산하지 못한 초기 상태
         if signed_speed_kmh is None:
@@ -532,6 +544,15 @@ def make_longitudinal_command(pid_output: float, signed_speed_kmh: Optional[floa
     else:
             ws_command = ""
             ws_weight = 0.0
+=======
+        ws_command = "S"
+        ws_weight = clamp(abs(pid_output), 0.0, 1.0)
+
+    else:
+        ws_command = ""
+        ws_weight = 0.0
+
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
     return {
         "moveWS": {
             "command": ws_command,
@@ -679,7 +700,11 @@ class TankDriveController:
     # --------------------------------------------------------
 
     # 직선 기준 최고 목표속도 [km/h].
+<<<<<<< HEAD
     MAX_SPEED_KMH = 40.0
+=======
+    MAX_SPEED_KMH = 60.0
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
 
     # 목적지/코너 제동거리 계산에서 가정하는 계획 감속도 [m/s^2].
     PLANNED_BRAKE_DECEL_MPS2 = 1.5
@@ -763,6 +788,7 @@ class TankDriveController:
         # /info에서 계산/필터링한 현재 속도 [km/h].
         self.info_speed_kmh: Optional[float] = None
 
+<<<<<<< HEAD
         # 위치변화 + 차체 방향으로 계산한 부호있는 속도
         self.info_signed_speed_kmh : Optional[float] = None
 
@@ -793,6 +819,35 @@ class TankDriveController:
         # PID가 마지막으로 추종하던 목적지 signature.
         self.last_pid_destination: Optional[Tuple[float, float]] = None
 
+=======
+        # 위치 기반 속도 fallback 계산에 사용하는 직전 차량 위치 [x, z] [m].
+        self.info_previous_position: Optional[List[float]] = None
+
+        # 위치 기반 속도 fallback 계산에 사용하는 직전 /info 시간 [sec, monotonic].
+        self.info_previous_time: Optional[float] = None
+
+        # 사격팀 보정용 실제 차체 각속도 계산에 사용하는
+        # 직전 /info 차체 yaw [deg].
+        self.fire_previous_body_yaw_deg: Optional[float] = None
+
+        # 사격팀 보정용 실제 차체 각속도 계산에 사용하는
+        # 직전 /info 수신 시간 [sec, monotonic].
+        self.fire_previous_body_yaw_time: Optional[float] = None
+
+        # 연속된 /info의 playerBodyX 변화량으로 계산한
+        # 현재 차체 yaw rate [deg/s].
+        self.fire_body_rate_dps: float = 0.0
+
+        # 직전 /get_action 제어 실행 시간 [sec, monotonic].
+        self.last_control_time: Optional[float] = None
+
+        # 목적지 반경에 한 번 진입한 뒤 다시 일반주행으로 복귀하지 않도록 유지하는 latch.
+        self.arrival_latched = False
+
+        # PID가 마지막으로 추종하던 목적지 signature.
+        self.last_pid_destination: Optional[Tuple[float, float]] = None
+
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
         # 속도 제어용 PID. I gain은 현재 notebook과 동일하게 0.
         self.speed_pid = PIDController(
             self.SPEED_KP,
@@ -840,7 +895,10 @@ class TankDriveController:
         /info 기반 속도 필터 상태를 초기화한다.
         """
         self.info_speed_kmh = None
+<<<<<<< HEAD
         self.info_signed_speed_kmh = None
+=======
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
         self.info_previous_position = None
         self.info_previous_time = None
 
@@ -859,7 +917,10 @@ class TankDriveController:
         self,
         data: Dict[str, Any],
         player_position: Sequence[float],
+<<<<<<< HEAD
         body_yaw_deg : Optional[float],
+=======
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
     ) -> Tuple[Optional[float], Optional[str]]:
         """
         /info에서 현재 속도를 갱신한다.
@@ -879,11 +940,22 @@ class TankDriveController:
         """
         now = time.monotonic()
 
+<<<<<<< HEAD
         measured_speed_kmh = None
         speed_source = None
 
         if (
             self.info_previous_position is not None
+=======
+        explicit_speed_kmh, speed_key = extract_speed_from_info(data)
+
+        measured_speed_kmh = explicit_speed_kmh
+        speed_source = speed_key
+
+        if (
+            measured_speed_kmh is None
+            and self.info_previous_position is not None
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
             and self.info_previous_time is not None
         ):
             dt = now - self.info_previous_time
@@ -899,6 +971,7 @@ class TankDriveController:
                     - float(self.info_previous_position[1])
                 )
 
+<<<<<<< HEAD
                 # 위치 변화량으로 실제 속력 계산
                 distance_m = math.hypot(dx, dz)
 
@@ -935,6 +1008,16 @@ class TankDriveController:
                         measured_speed_kmh
                     )
 
+=======
+                measured_speed_kmh = (
+                    math.hypot(dx, dz)
+                    / dt
+                    * 3.6
+                )
+
+                speed_source = "playerPos/dt"
+
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
         self.info_previous_position = [
             float(player_position[0]),
             float(player_position[1]),
@@ -1200,11 +1283,14 @@ class TankDriveController:
             speed_kmh, speed_source = self._update_info_speed(
                 data,
                 self.current_pos,
+<<<<<<< HEAD
                 body_yaw_deg,
             )
             print(
                 "[/info] signed speed:",
                 self.info_signed_speed_kmh,
+=======
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
             )
         else:
             speed_kmh = self.info_speed_kmh
@@ -1390,6 +1476,7 @@ class TankDriveController:
                 float,
                 data["destination"].split(","),
             )
+<<<<<<< HEAD
         except Exception as exc:
             # 좌표 파싱 자체가 실패한 경우(콤마 개수, 숫자 변환 등)만
             # "Invalid format"으로 분류한다.
@@ -1399,12 +1486,16 @@ class TankDriveController:
             }, 400
 
         try:
+=======
+
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
             return self.apply_destination(
                 x,
                 y,
                 z,
             ), 200
 
+<<<<<<< HEAD
         except ValueError as exc:
             # apply_destination() -> find_path()가 던지는 ValueError는
             # 좌표 형식 문제가 아니라 "시작점/목적지가 장애물(패딩 포함)에
@@ -1425,6 +1516,13 @@ class TankDriveController:
                 "status": "ERROR",
                 "message": f"Unexpected error: {str(exc)}",
             }, 500
+=======
+        except Exception as exc:
+            return {
+                "status": "ERROR",
+                "message": f"Invalid format: {str(exc)}",
+            }, 400
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
 
     # --------------------------------------------------------
     # D* Lite obstacle / map 관리
@@ -1612,6 +1710,7 @@ class TankDriveController:
         """
         현재 D* Lite obstacle/path 상태를 PNG로 저장한다.
 
+<<<<<<< HEAD
         주의:
             planner.plot()(동기/blocking)이 아니라 plot_async()를 쓴다.
             plot()은 matplotlib legend(loc='best')가 obstacle_rectangles
@@ -1624,16 +1723,25 @@ class TankDriveController:
             필요한 데이터만 스냅샷 떠서 별도 데몬 스레드에 넘기고
             즉시 리턴하므로 요청 스레드를 막지 않는다.
 
+=======
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
         Args:
             title:
                 plot 제목.
 
         Returns:
+<<<<<<< HEAD
             저장될 예정인 map 이미지 파일 경로. plot_async()는 비동기라
             이 시점에는 아직 파일이 안 만들어져 있을 수 있다.
         """
         with self.planner_lock:
             self.planner.plot_async(
+=======
+            저장된 map 이미지 파일 경로.
+        """
+        with self.planner_lock:
+            self.planner.plot(
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
                 path=(
                     self.current_path
                     if self.current_path
@@ -1642,6 +1750,10 @@ class TankDriveController:
                 show_grid=True,
                 title=title,
                 save_path=self.map_image_path,
+<<<<<<< HEAD
+=======
+                show=False,
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
             )
 
         return self.map_image_path
@@ -1650,17 +1762,21 @@ class TankDriveController:
         """
         /path_map endpoint에서 send_file에 넘길 map 이미지 경로를 반환한다.
 
+<<<<<<< HEAD
         render_map()은 이제 비동기라 파일이 아직 안 만들어졌을 수 있다.
         여긴 사람이 브라우저로 이미지를 열어보는 디버그용 endpoint라
         핫패스(주행 루프)와 달리 한 번쯤 느려도 괜찮으므로, 파일이 아예
         없는 최초 1회에 한해 동기 plot()으로 확실히 만들어서 돌려준다.
 
+=======
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
         Returns:
             map PNG 경로.
         """
         if not Path(
             self.map_image_path
         ).exists():
+<<<<<<< HEAD
             with self.planner_lock:
                 self.planner.plot(
                     path=(
@@ -1673,6 +1789,11 @@ class TankDriveController:
                     save_path=self.map_image_path,
                     show=False,
                 )
+=======
+            self.render_map(
+                "D* Lite Map"
+            )
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
 
         return self.map_image_path
 
@@ -2306,8 +2427,12 @@ class TankDriveController:
 
                 command = (
                     make_longitudinal_command(
+<<<<<<< HEAD
                         final_pid_output,
                         self.info_signed_speed_kmh,
+=======
+                        final_pid_output
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
                     )
                 )
 
@@ -2419,8 +2544,12 @@ class TankDriveController:
 
             command = (
                 make_longitudinal_command(
+<<<<<<< HEAD
                     braking_pid_output,
                     self.info_signed_speed_kmh,
+=======
+                    braking_pid_output
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
                 )
             )
 
@@ -2429,8 +2558,12 @@ class TankDriveController:
         else:
             command = (
                 make_longitudinal_command(
+<<<<<<< HEAD
                     pid_output,
                     self.info_signed_speed_kmh,
+=======
+                    pid_output
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8
                 )
             )
 
@@ -2512,4 +2645,8 @@ class TankDriveController:
             f"AD={command['moveAD']}"
         )
 
+<<<<<<< HEAD
         return command
+=======
+        return command
+>>>>>>> ed73b6e8c453a668f805bea19523438bf9b7ebe8

@@ -37,6 +37,7 @@ from move.dstar_lite_planner_cost import DStarPlanner, INF
 class RiskDStarPlanner(DStarPlanner):
 
     def __init__(self, *args,
+                 is_enemy = False,
                  slope_weight=3.0,
                  exposure_weight=6.0,
                  threat_weight=40.0,
@@ -58,7 +59,8 @@ class RiskDStarPlanner(DStarPlanner):
             고도맵이 2 m 격자이고 전차 폭이 3.6 m 이므로
             150x150 (셀 2 m) 로 충분하고, 노드가 1/4 이라 훨씬 빠르다.
         """
-        super().__init__(*args, **kw)
+        super().__init__(is_enemy=is_enemy, *args, **kw)
+
         self.cell_size = float(cell_size)
         self.slope_weight = float(slope_weight)
         self.exposure_weight = float(exposure_weight)
@@ -68,6 +70,8 @@ class RiskDStarPlanner(DStarPlanner):
         self.exposure = None          # (H, W) float, 0~1
         self.threat = None            # (H, W) float, 0~1  동적
         self.terrain_blocked = set()  # 경사 한계 초과 셀
+
+        self.set_risk_layers()
 
     # ── 좌표 변환 (셀 크기 반영) ──────────────────────────
     def world_to_grid(self, position, clamp=False):
@@ -254,6 +258,9 @@ class RiskDStarPlanner(DStarPlanner):
             서버 호출:
                 planner.plot(path=current_path, show_grid=True, title="...")
             """
+            if self.is_enemy:
+                return
+            
             active_path = self.last_path if path is None else path
     
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -289,6 +296,51 @@ class RiskDStarPlanner(DStarPlanner):
                 patch = Rectangle(
                     ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
                     1.0, 1.0,
+                    alpha=0.5,
+                )
+                ax.add_patch(patch)
+
+            for obs in self.obstacle_rectangles:
+                patch = Rectangle(
+                    (obs.x_min - self.obstacle_margin, obs.z_min - self.obstacle_margin),
+                    (obs.x_max - obs.x_min) + 2 * self.obstacle_margin,
+                    (obs.z_max - obs.z_min) + 2 * self.obstacle_margin,
+                    alpha=0.5,
+                )
+                ax.add_patch(patch)
+    
+                color = '#228B22'
+                for obs in self.obstacle_rectangles:
+                    if obs.type == 'nature':
+                        color = '#228B22'
+                    elif obs.type == 'unknown':
+                        color = '#000000'
+                    elif obs.type == 'enemy_tank':
+                        color = '#800020'
+                    elif obs.type == 'enemy':
+                        color = '#FF8C00'
+                    elif obs.type == 'team':
+                        color = '#8A2BE2'
+                    elif obs.type == 'team_tank':
+                        color = '#000080'
+    
+                    patch = Rectangle(
+                        (
+                            obs.x_min - self.obstacle_margin,
+                            obs.z_min - self.obstacle_margin,
+                        ),
+                        (obs.x_max - obs.x_min) + 2 * self.obstacle_margin,
+                        (obs.z_max - obs.z_min) + 2 * self.obstacle_margin,
+                        facecolor=color, 
+                    )
+                    ax.add_patch(patch)
+
+            
+            for x,z in self.movable_enemy_tank:
+                patch = Rectangle(
+                    ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
+                    1.0, 1.0,
+                    facecolor='purple', 
                     alpha=0.5,
                 )
                 ax.add_patch(patch)
@@ -414,6 +466,14 @@ class RiskDStarPlanner(DStarPlanner):
             )
             ax.add_patch(rect_grid)
         ax.plot([], [], color='magenta', alpha=0.3, label="Blocked Terrain", linestyle='-', linewidth=5)
+
+        for x,z in self.obstacles:
+            patch = Rectangle(
+                ((x+0.5) - 1.0 * 0.5, (z+0.5) - 1.0 * 0.5), # 사각형의 시작점(좌측 하단)
+                1.0, 1.0,
+                alpha=0.5,
+            )
+            ax.add_patch(patch)
 
         for obs in obstacle_rectangles:
             patch = Rectangle(
