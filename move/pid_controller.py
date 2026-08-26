@@ -1122,6 +1122,9 @@ class TankDriveController:
 
         self.latest_info = data
 
+        if self.latest_info.get("enemy_path", []) != []:
+            self.planner.insert_enemy_tank_path(self.latest_info)
+
         # 이번 /info에서 받은 실제 차체 yaw [deg].
         body_yaw_deg = (
             self._read_player_body_yaw_deg()

@@ -35,6 +35,8 @@ path_planner = DStarLitePlanner()
 # D* Lite 경로 추종 + 속도/조향 PID controller.
 drive_controller = TankDriveController(path_planner)
 
+enemy_path = []
+
 def send_to_5100(target_data, name):
     try:
         requests.post("http://127.0.0.1:5100/"+name, json=target_data, timeout=1)
@@ -69,7 +71,8 @@ def info():
 
     # 이번 /info 요청의 단일 JSON snapshot.
     data = request.get_json(force=True)
-
+    data["enemy_path"] = enemy_path
+    
     # /get_action 사격 운동 보정에 사용할 최신 telemetry.
     all_info = data
 
@@ -86,6 +89,12 @@ def info():
 
     return jsonify(response)
 
+@app.route('/get_enemy_path', methods=['POST'])
+def get_enemy_path():
+    global enemy_path
+    enemy_path = request.get_json(force=True).get('enemy_path')
+
+    return jsonify({"status": "success"}), 200
 
 @app.route('/get_action', methods=['POST'])
 def get_action():

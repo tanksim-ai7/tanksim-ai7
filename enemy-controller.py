@@ -85,6 +85,17 @@ def get_action():
     data = request.get_json(force=True)
     rst_cmd = drive_controller.get_action(data)
     
+    try:
+        enemy_path = getattr(drive_controller.planner, "last_path", [])
+        
+        requests.post(
+            "http://127.0.0.0:5000/get_enemy_path",
+            json={"enemy_path": enemy_path},
+            timeout=0.05
+        )
+    except Exception as e:
+        pass
+    
     return jsonify(rst_cmd)
 
 @app.route('/update_bullet', methods=['POST'])
