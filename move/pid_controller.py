@@ -493,7 +493,7 @@ def make_stop_command() -> Dict[str, Any]:
     }
 
 
-def make_longitudinal_command(pid_output: float, current_speed_kmh : float) -> Dict[str, Any]:
+def make_longitudinal_command(pid_output: float, signed_speed_kmh: Optional[float] = None) -> Dict[str, Any]:
     """
     속도 PID 출력을 W/S 명령으로 변환한다.
 
@@ -514,18 +514,24 @@ def make_longitudinal_command(pid_output: float, current_speed_kmh : float) -> D
         ws_weight = clamp(pid_output, 0.0, 1.0)
 
     elif pid_output < -deadband:
-        if current_speed_kmh > stop_speed:
-            ws_command = "S"
-            ws_weight = clamp(abs(pid_output), 0.0, 1.0)
 
-        else:
+        # signed speed를 아직 계산하지 못한 초기 상태
+        if signed_speed_kmh is None:
             ws_command = ""
             ws_weight = 0.0
 
-    else:
-        ws_command= ""
-        ws_weight = 0.0
+        # 아직 전진 중이면 S를 제동으로 사용
+        elif signed_speed_kmh > 1.0:
+            ws_command = "S"
+            ws_weight = clamp(abs(pid_output), 0.0, 1.0)
 
+        # 정지 근처 또는 이미 후진하기 시작했으면 S 차단
+        else:
+            ws_command = ""
+            ws_weight = 0.0
+    else:
+            ws_command = ""
+            ws_weight = 0.0
     return {
         "moveWS": {
             "command": ws_command,
@@ -673,7 +679,7 @@ class TankDriveController:
     # --------------------------------------------------------
 
     # 직선 기준 최고 목표속도 [km/h].
-    MAX_SPEED_KMH = 60.0
+    MAX_SPEED_KMH = 40.0
 
     # 목적지/코너 제동거리 계산에서 가정하는 계획 감속도 [m/s^2].
     PLANNED_BRAKE_DECEL_MPS2 = 1.5
@@ -757,6 +763,9 @@ class TankDriveController:
         # /info에서 계산/필터링한 현재 속도 [km/h].
         self.info_speed_kmh: Optional[float] = None
 
+        # 위치변화 + 차체 방향으로 계산한 부호있는 속도
+        self.info_signed_speed_kmh : Optional[float] = None
+
         # 위치 기반 속도 fallback 계산에 사용하는 직전 차량 위치 [x, z] [m].
         self.info_previous_position: Optional[List[float]] = None
 
@@ -831,6 +840,7 @@ class TankDriveController:
         /info 기반 속도 필터 상태를 초기화한다.
         """
         self.info_speed_kmh = None
+        self.info_signed_speed_kmh = None
         self.info_previous_position = None
         self.info_previous_time = None
 
@@ -849,6 +859,7 @@ class TankDriveController:
         self,
         data: Dict[str, Any],
         player_position: Sequence[float],
+        body_yaw_deg : Optional[float],
     ) -> Tuple[Optional[float], Optional[str]]:
         """
         /info에서 현재 속도를 갱신한다.
@@ -868,14 +879,11 @@ class TankDriveController:
         """
         now = time.monotonic()
 
-        explicit_speed_kmh, speed_key = extract_speed_from_info(data)
-
-        measured_speed_kmh = explicit_speed_kmh
-        speed_source = speed_key
+        measured_speed_kmh = None
+        speed_source = None
 
         if (
-            measured_speed_kmh is None
-            and self.info_previous_position is not None
+            self.info_previous_position is not None
             and self.info_previous_time is not None
         ):
             dt = now - self.info_previous_time
@@ -891,13 +899,41 @@ class TankDriveController:
                     - float(self.info_previous_position[1])
                 )
 
-                measured_speed_kmh = (
-                    math.hypot(dx, dz)
-                    / dt
-                    * 3.6
-                )
+                # 위치 변화량으로 실제 속력 계산
+                distance_m = math.hypot(dx, dz)
+
+                speed_mps = distance_m / dt
+                measured_speed_kmh = speed_mps * 3.6
 
                 speed_source = "playerPos/dt"
+
+                # -------------------------------------------------
+                # 전진 / 후진 방향 판별
+                # -------------------------------------------------
+                if body_yaw_deg is not None:
+                    yaw_rad = math.radians(body_yaw_deg)
+
+                    # 차체 정면 벡터와 실제 이동 벡터의 내적
+                    forward_dot = (
+                        math.sin(yaw_rad) * dx
+                        + math.cos(yaw_rad) * dz
+                    )
+
+                    direction_sign = (
+                        1.0
+                        if forward_dot >= 0.0
+                        else -1.0
+                    )
+
+                    self.info_signed_speed_kmh = (
+                        measured_speed_kmh * direction_sign
+                    )
+
+                else:
+                    # yaw를 못 받은 경우 방향 판별 불가
+                    self.info_signed_speed_kmh = (
+                        measured_speed_kmh
+                    )
 
         self.info_previous_position = [
             float(player_position[0]),
@@ -1164,6 +1200,11 @@ class TankDriveController:
             speed_kmh, speed_source = self._update_info_speed(
                 data,
                 self.current_pos,
+                body_yaw_deg,
+            )
+            print(
+                "[/info] signed speed:",
+                self.info_signed_speed_kmh,
             )
         else:
             speed_kmh = self.info_speed_kmh
@@ -2266,7 +2307,7 @@ class TankDriveController:
                 command = (
                     make_longitudinal_command(
                         final_pid_output,
-                        current_speed_kmh
+                        self.info_signed_speed_kmh,
                     )
                 )
 
@@ -2379,7 +2420,7 @@ class TankDriveController:
             command = (
                 make_longitudinal_command(
                     braking_pid_output,
-                    current_speed_kmh
+                    self.info_signed_speed_kmh,
                 )
             )
 
@@ -2389,7 +2430,7 @@ class TankDriveController:
             command = (
                 make_longitudinal_command(
                     pid_output,
-                    current_speed_kmh
+                    self.info_signed_speed_kmh,
                 )
             )
 
