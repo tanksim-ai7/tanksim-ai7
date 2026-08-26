@@ -1012,6 +1012,30 @@ class TankDriveController:
         """
         handle_objects_detected()가 백그라운드 스레드에서 실행하는 실제 로직.
         직접 호출하지 말고 handle_objects_detected()를 통해서만 사용한다.
+
+        설계 변경(중요):
+            예전엔 매칭 안 된(unmatched) 탐지를 pad_object()로 새 장애물을
+            만들었는데, 이걸 없앴다. 이유:
+
+            1) 실시간으로 움직이는 적 전차 1대는 이미 latest_info["enemyPos"]
+               기반 movable_enemy_tank(find_path() 안에서 매번 갱신)로 별도
+               처리되고 있어서, 우리 비전 탐지가 새로 장애물을 만들어줄
+               필요가 원래 없다.
+            2) 우리가 매핑해야 하는 진짜 대상은 "이미 /update_obstacle로
+               등록된 고정 장애물의 타입 확정"뿐이다. 즉 매칭이 되어야
+               정상이고, 매칭이 안 됐다는 건 새 오브젝트를 찾은 게
+               아니라 대부분 신뢰할 수 없는 탐지(먼 거리에서 스테레오
+               삼각측량 오차가 커진 경우 등)라는 신호에 가깝다.
+            3) 실측(디버그 로그)으로 확인됨: 거리 100m 이상에서
+               baseline 1m 스테레오는 disparity 1~2px 차이만으로도
+               depth가 100m 넘게 요동친다. 이런 신뢰 못 할 좌표를 매번
+               pad_object로 새로 등록하면, 매 프레임 다른 위치에
+               유령 장애물이 계속 쌓여서 실제 경로 탐색을 방해했다.
+
+            그래서 이제 unmatched는 그냥 로그만 남기고 아무 것도
+            등록하지 않는다. (나중에 "Unity가 아직 등록 안 해준 진짜
+            새 오브젝트"를 다뤄야 하는 상황이 생기면 이 부분을 다시
+            설계해야 한다.)
         """
         try:
             with self.planner_lock:
@@ -1022,18 +1046,10 @@ class TankDriveController:
             if changed_cells:
                 self.render_map("D* Lite Map (오브젝트 타입 갱신)")
 
-            for (x, y, z, name) in unmatched:
-                half_width, half_length = self._OBJECT_HALF_EXTENTS_M.get(
-                    name, (2.0, 3.5),
-                )
-                obj_type = self._OBJECT_TYPE_FOR_PAD.get(name, 'enemy')
-
-                # 매칭되는 기존 obstacle이 없었던 탐지 -> 새 장애물로 등록.
-                # pad_object + 경로 반응까지 처리하는 기존 로직을 그대로 재사용한다.
-                self._process_object_detected(
-                    x - half_width, x + half_width,
-                    z - half_length, z + half_length,
-                    obj_type,
+            if unmatched:
+                print(
+                    f"[_process_objects_detected] 매칭 안 된 탐지 {len(unmatched)}건 "
+                    f"무시함(신뢰도 낮은 좌표로 간주): {unmatched}"
                 )
 
         except Exception as exc:
