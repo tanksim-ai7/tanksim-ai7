@@ -1357,49 +1357,74 @@ class DStarPlanner:
             오브젝트 타입 업데이트 (detect된 오브젝트들에 대해서 type update)
             target_list = [(x, y, z, name), ...]
 
-            main쪽에서 특정 전역 변수(tmp_list(임시))에 값이 채워지면
-            get_action에서 움직임을 멈추고
-            DStarPlanner.update_obstacles_type(tmp_list) 하여 경로 update & tmp_list = []로 초기화 후 진행
-        """
+            우리 인지 파이프라인이 탐지한 (x, y, z, class_name) 목록을 받아서,
+            이미 등록된 obstacle_rectangles(Unity /update_obstacle로 온, 고정된
+            지형/오브젝트) 중 이 좌표를 포함하는 게 있으면 그 타입을 name
+            기준으로 재분류한다.
 
-        chg_list = [] # 바뀐 리스트
+            좌표를 포함하는 기존 obstacle이 하나도 없으면(예: 실시간으로
+            움직이는 적 전차처럼 Unity가 애초에 등록해주지 않는 동적
+            오브젝트) 그 항목은 unmatched로 반환한다 -- 호출부가
+            pad_object() 등으로 새 장애물을 만들어 대응해야 하는 대상이라는
+            뜻이다.
+
+            주의: ObstacleRect는 frozen dataclass라 기존 인스턴스의 .type을
+            직접 못 바꾼다. 그래서 좌표는 그대로 두고 ObstacleRect.from_min_max()로
+            다시 만들어서(그 안에서 아래에서 갱신한 전역 분류 리스트를 다시
+            조회해 올바른 타입이 매겨진다) set_obstacles()에 반영한다.
+
+        Returns
+        -------
+        changed_cells : set[GridNode]
+            이번 재분류로 실제로 통행 가능/불가 상태가 바뀐 grid 셀들.
+            재분류가 하나도 없었으면 빈 set.
+        unmatched : List[Tuple[float, float, float, str]]
+            좌표를 포함하는 기존 obstacle을 못 찾은 탐지 항목들.
+        """
+        global unknown_list, enemy_list, enemy_tank_list, team_list, team_tank_list
+
+        chg_list = [] # 재분류된 (x_min, x_max, z_min, z_max, type) 목록
+        unmatched = [] # 매칭되는 기존 obstacle이 없었던 탐지 항목들
+
+        name_to_type = {
+            'Human1': 'enemy',
+            'Human2': 'enemy',
+            'Tank1': 'enemy_tank',
+            'Human3': 'team',
+            'Tank2': 'team_tank',
+        }
+
         for x, y, z, name in target_list:
-            # nx, nz = self.world_to_grid((x, z), True) # 서버의 [x, z] 좌표를 Grid (x, z)로 변환. (굳이 필요한 작업인가?)
+            desired_type = name_to_type.get(name)
+            matched = False
 
             for idx in range(len(self.obstacle_rectangles)):
-                x_min = max(self.obstacle_rectangles[idx].x_min, 0)
-                x_max = min(self.obstacle_rectangles[idx].x_max, self.width)
-                z_min = max(self.obstacle_rectangles[idx].z_min, 0)
-                z_max = min(self.obstacle_rectangles[idx].z_max, self.height)
+                rect = self.obstacle_rectangles[idx]
+                x_min = max(rect.x_min, 0)
+                x_max = min(rect.x_max, self.width)
+                z_min = max(rect.z_min, 0)
+                z_max = min(rect.z_max, self.height)
 
-                # obstacle의 min/max 값 범위에 x,z 모두 포함된다. & type == 'nature'일 때
-                if x_min <= x <= x_max and z_min <= z <= z_max and self.obstacle_rectangles[idx].type != 'nature':
-                    type_name = 'unknown' # 일단 아래 오브젝트를 제외한 모든 것들은 unknown으로 빠진다.
-                    if name == 'Human1' or name == 'Human2':
-                        if self.obstacle_rectangles[idx].type == 'enemy': # 이미 같은 타입으로 특정된 오브젝트면 continue
-                            continue
-                        type_name = 'enemy'
-                    elif name == 'Tank1':
-                        if self.obstacle_rectangles[idx].type == 'enemy_tank':
-                            continue
-                        type_name = 'enemy_tank'
-                    elif name == 'Human3':
-                        if self.obstacle_rectangles[idx].type == 'team':
-                            continue
-                        type_name = 'team'
-                    elif name == 'Tank2':
-                        if self.obstacle_rectangles[idx].type == 'team_tank':
-                            continue
-                        type_name = 'team_tank'
+                if not (x_min <= x <= x_max and z_min <= z <= z_max):
+                    continue
 
-                    if type_name != 'unknown':
-                        chg_list.append((self.obstacle_rectangles[idx].x_min, self.obstacle_rectangles[idx].x_max, self.obstacle_rectangles[idx].z_min, self.obstacle_rectangles[idx].z_max, type_name))
+                # 이 좌표를 포함하는 첫 obstacle을 기준으로 판단한다
+                # (여러 개가 겹쳐 있는 경우는 고려하지 않음).
+                matched = True
 
-                    break # break를 해야하나? (좌표가 겹친다면? break 걸지 말고 다 append 쳐줘야 하는가?)
+                if desired_type is not None and rect.type != desired_type:
+                    chg_list.append((rect.x_min, rect.x_max, rect.z_min, rect.z_max, desired_type))
 
-        # 반복문 완료 후 chg_list의 값을 통해 전역변수 업데이트
-        
-        # 먼저 chg_list의 모든 요소를 전역변수에서 제거해준다.
+                break
+
+            if not matched:
+                unmatched.append((x, y, z, name))
+
+        if not chg_list:
+            return set(), unmatched
+
+        # 전역 분류 리스트 갱신: 이번에 바뀐 좌표는 기존에 어느 리스트에
+        # 있었든 일단 빼고, 새로 확정된 타입의 리스트에 다시 넣는다.
         chg_set = {dt[:4] for dt in chg_list}
         unknown_list = [dt for dt in unknown_list if dt not in chg_set]
         enemy_list = [dt for dt in enemy_list if dt not in chg_set]
@@ -1407,7 +1432,6 @@ class DStarPlanner:
         team_list = [dt for dt in team_list if dt not in chg_set]
         team_tank_list = [dt for dt in team_tank_list if dt not in chg_set]
 
-        # 다시 chg_list의 모든 요소들을 type에 맞게 전역변수에 넣어준다.
         for dt in chg_list:
             if dt[4] == 'enemy':
                 enemy_list.append(dt[:4])
@@ -1417,9 +1441,16 @@ class DStarPlanner:
                 team_list.append(dt[:4])
             elif dt[4] == 'team_tank':
                 team_tank_list.append(dt[:4])
-        
-        # obstacle type update (전역변수를 통해 type이 업데이트 된다.)
-        self.update_dstar_obstacles_from_payload(self.obstacle_rectangles)
+
+        # 좌표는 그대로 두고, 방금 갱신한 전역 분류 리스트를 다시 조회해서
+        # 타입만 새로 확정되도록 전체 obstacle_rectangles를 재생성한다.
+        rebuilt = [
+            ObstacleRect.from_min_max(r.x_min, r.x_max, r.z_min, r.z_max)
+            for r in self.obstacle_rectangles
+        ]
+        changed_cells = self.set_obstacles(rebuilt)
+
+        return changed_cells, unmatched
 
 
     def _is_visible_under_height(self, p1: Tuple[float, float], p2: Tuple[float, float], max_allowed_y: float, num: int) -> bool:

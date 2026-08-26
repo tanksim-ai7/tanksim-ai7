@@ -4,6 +4,12 @@ VERTICAL_FOV = 28.0  # deg, 기존과 동일 가정
 HORIZONTAL_FOV_STEREO = 47.81061
 LATEST_INFO = {}
 
+# 좌표 오차 원인 파악용 디버그 로그 스위치.
+# True로 두면 compute_stereo_for_pair()의 중간 계산값(baseline/disparity/
+# depth/bearing 등)과 raw/smoothed world 좌표가 전부 콘솔에 찍힌다.
+# 원인 확인 끝나면 False로 돌려서 로그 양을 줄이면 된다.
+DEBUG_STEREO = True
+
 # 감지된 오브젝트의 이름, 좌표값을 전역변수로 list 저장
 DETECTED_OBJECTS_INFO = []
 
@@ -118,7 +124,13 @@ def compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h):
     left_pos = LATEST_INFO.get("stereoCameraLeftPos")
     left_rot = LATEST_INFO.get("stereoCameraLeftRot")
     right_pos = LATEST_INFO.get("stereoCameraRightPos")
+    right_rot = LATEST_INFO.get("stereoCameraRightRot")
     if not left_pos or not right_pos or not left_rot:
+        if DEBUG_STEREO:
+            print(
+                "[STEREO DEBUG] LATEST_INFO에 카메라 좌표/회전이 없어서 계산 스킵 "
+                f"(left_pos={left_pos}, right_pos={right_pos}, left_rot={left_rot})"
+            )
         return None
 
     baseline = ts.math.sqrt(
@@ -128,9 +140,11 @@ def compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h):
     )
 
     cxL, cyL = bbox_center(left_bbox)
-    cxR, _ = bbox_center(right_bbox)
+    cxR, cyR = bbox_center(right_bbox)
     disparity = abs(cxL - cxR)
     if disparity < 1e-3:
+        if DEBUG_STEREO:
+            print(f"[STEREO DEBUG] disparity가 0에 가까워서 계산 스킵 (cxL={cxL}, cxR={cxR})")
         return None
 
     focal_px = get_focal_px(img_w)
@@ -156,6 +170,21 @@ def compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h):
             (player_pos["x"] - world_pos["x"]) ** 2 +
             (player_pos["y"] - world_pos["y"]) ** 2 +
             (player_pos["z"] - world_pos["z"]) ** 2
+        )
+
+    if DEBUG_STEREO:
+        print(
+            "[STEREO DEBUG] ---- 좌표 계산 중간값 ----\n"
+            f"  left_pos={left_pos}  left_rot={left_rot}\n"
+            f"  right_pos={right_pos}  right_rot={right_rot}\n"
+            f"  playerPos={player_pos}\n"
+            f"  bbox: left_center=({cxL:.1f},{cyL:.1f}) right_center=({cxR:.1f},{cyR:.1f}) "
+            f"disparity={disparity:.2f}px img_w={img_w} img_h={img_h}\n"
+            f"  baseline={baseline:.4f}m  focal_px={focal_px:.2f}  depth={depth:.3f}m\n"
+            f"  h_offset={h_offset:.2f}deg  v_offset={v_offset:.2f}deg  "
+            f"bearing={bearing:.2f}deg  vertical={vertical:.2f}deg\n"
+            f"  dx={dx:.3f} dy={dy:.3f} dz={dz:.3f}\n"
+            f"  -> raw world_pos={world_pos}  distance_to_player={distance_3d}"
         )
 
     return {"world_pos": world_pos, "distance": distance_3d, "bearing": bearing}
@@ -185,9 +214,20 @@ def scan_all_objects(target_classes, left_path="temp_left.jpg", right_path="temp
             # 스무딩 적용
             smoothed_pos = smooth_position(class_name, result["world_pos"])
             if smoothed_pos is None:                      #아직 안정화 안 됐으면 이번 프레임은 건너뜀
+                if DEBUG_STEREO:
+                    print(
+                        f"[STEREO DEBUG] {class_name}: 스무딩 샘플 부족으로 이번 프레임 스킵 "
+                        f"(raw_world_pos={result['world_pos']})"
+                    )
                 continue
             result["raw_world_pos"] = result["world_pos"]   # 원본값도 참고용으로 남겨둠
             result["world_pos"] = smoothed_pos
+
+            if DEBUG_STEREO:
+                print(
+                    f"[STEREO DEBUG] {class_name}: raw={result['raw_world_pos']} "
+                    f"-> smoothed={smoothed_pos}"
+                )
 
             player_pos = LATEST_INFO.get("playerPos")
             if player_pos:
@@ -302,6 +342,14 @@ def stereo_image():                             # 오브젝트 좌표, 위협도
     right_image.save(right_path)
 
     #target_classes = {0: "human1", 1: "human2"}   # 나중에 실제 클래스로 확장
+
+    if DEBUG_STEREO:
+        print(
+            "[STEREO DEBUG] ==== /stereo_image 프레임 시작 ====\n"
+            f"  playerPos={LATEST_INFO.get('playerPos')}  "
+            f"stereoCameraLeftPos={LATEST_INFO.get('stereoCameraLeftPos')}  "
+            f"stereoCameraLeftRot={LATEST_INFO.get('stereoCameraLeftRot')}"
+        )
 
     objects = scan_all_objects(ts.target_classes, left_path, right_path)
     ranked = rank_objects_by_threat(objects)

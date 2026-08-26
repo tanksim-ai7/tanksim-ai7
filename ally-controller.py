@@ -47,54 +47,43 @@ def detect():
 # tskijun.DETECTED_OBJECTS_INFO에 담기는 class_name 중, D* Lite 맵에
 # '적 전차' 장애물로 패딩해야 하는 것들. 다른 클래스(Human/Rock/Tree 등)도
 # 필요해지면 여기에 obj_type 매핑만 추가하면 된다.
-ENEMY_TANK_CLASSES = {"Tank1"}
-
-# 적 전차의 x/z 절반 크기[m]. compute_stereo_for_pair()가 world_pos를
-# 점(point) 하나로만 계산해주기 때문에, pad_object()가 받는 bounding
-# box(x_min/x_max/z_min/z_max)를 만들기 위해 이 정도 크기의 여유를 둔다.
 #
-# 실측 하단 몸체 크기(x, y, z) = (3.303, 1.131, 6.339) 기준.
-# y는 높이(수직)축이라 2D 평면(x-z) 위에서 도는 D* Lite 충돌판정엔
-# 안 쓴다 -- get_bb_corners(cx, cz, 3.303, 6.339, angle) 호출에서도
-# 동일하게 x, z만 쓰는 것과 같은 이유.
-# 포탑 크기(2.681, 3.094, 2.822)는 x/z 모두 몸체보다 작아 몸체 풋프린트
-# 안에 들어오므로 몸체 크기만으로 충분하다.
-#
-# set_obstacles()가 obj_type='enemy_tank' 기준으로 이미 큰 안전 반경을
-# 더 얹어주므로, 여기서는 실제 차체 크기만 잡으면 된다.
-ENEMY_TANK_BODY_X_M = 3.303
-ENEMY_TANK_BODY_Z_M = 6.339
-ENEMY_TANK_HALF_WIDTH_M = ENEMY_TANK_BODY_X_M / 2   # 1.6515
-ENEMY_TANK_HALF_LENGTH_M = ENEMY_TANK_BODY_Z_M / 2  # 3.1695
+# 각 클래스별 실제 바운딩 박스 크기(pad_object 폴백 시 쓸 half-extent)는
+# pid_controller.py의 TankDriveController._OBJECT_HALF_EXTENTS_M에서
+# 관리한다 (update_obstacles_type() 매칭 실패 시 그쪽에서 계산).
+ENEMY_TANK_CLASSES = {"Tank1", "Tank2"}
 
 
 @app.route('/stereo_image', methods=['POST'])
 def stereo_image():
     """
-    인식팀 stereo image 모듈을 호출하고, 새로 확보된 적 전차 world 좌표를
-    D* Lite planner의 회피/후퇴 로직(pad_object -> handle_object_detected)에
-    반영한다.
+    인식팀 stereo image 모듈을 호출하고, 새로 확보된 오브젝트 world 좌표를
+    D* Lite planner에 반영한다.
+
+    처리 방식: 먼저 update_obstacles_type()으로 Unity /update_obstacle가
+    이미 등록해둔 고정 오브젝트(예: 고정 배치된 Tank1 모형)와 좌표가
+    겹치는지 확인해서 타입만 재분류하고, 겹치는 게 없는 탐지(예: 실시간
+    으로 움직이는 적 전차)만 pad_object() 기반으로 새 장애물을 등록한다.
+    (drive_controller.handle_objects_detected() 안에서 이 두 단계를
+    자동으로 처리한다.)
     """
     tskijun.stereo_image()
 
     # tskijun.stereo_image()가 채워둔 최신 탐지 결과.
     # [(x, y, z, class_name), ...] 형태.
-    for x, y, z, class_name in tskijun.DETECTED_OBJECTS_INFO:
-        if class_name not in ENEMY_TANK_CLASSES:
-            continue
+    detections = [
+        (x, y, z, class_name)
+        for x, y, z, class_name in tskijun.DETECTED_OBJECTS_INFO
+        if class_name in ENEMY_TANK_CLASSES
+    ]
 
+    if detections:
         try:
-            drive_controller.handle_object_detected(
-                x - ENEMY_TANK_HALF_WIDTH_M,
-                x + ENEMY_TANK_HALF_WIDTH_M,
-                z - ENEMY_TANK_HALF_LENGTH_M,
-                z + ENEMY_TANK_HALF_LENGTH_M,
-                obj_type='enemy_tank',
-            )
+            drive_controller.handle_objects_detected(detections)
         except Exception as exc:
             # 탐지/회피 쪽 예외로 인식 파이프라인 응답 자체가 죽지 않게
             # 방어한다. 원인은 콘솔에 남긴다.
-            print(f"[/stereo_image] handle_object_detected 처리 실패: {exc}")
+            print(f"[/stereo_image] handle_objects_detected 처리 실패: {exc}")
 
     return ts.jsonify({"result": "success"})
 

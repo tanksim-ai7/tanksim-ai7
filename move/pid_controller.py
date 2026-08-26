@@ -954,6 +954,93 @@ class TankDriveController:
 
         return safe if len(safe) >= 2 else None
 
+    # 인지 파이프라인이 보내는 class_name -> (half_width_m, half_length_m).
+    # 실측 하단 몸체 크기(x, y, z) 기준 절반값. y(높이)는 2D 평면(x-z)에서
+    # 도는 D* Lite 충돌판정엔 안 쓴다.
+    #   적 전차 몸체 (3.303, 1.131, 6.339) -> half_width=1.6515, half_length=3.1695
+    # Tank2(아군 전차)는 정확한 실측치가 따로 없어 우선 동일 차체로 가정한다.
+    # 실측치가 확인되면 여기 값만 바꾸면 된다.
+    _OBJECT_HALF_EXTENTS_M: Dict[str, Tuple[float, float]] = {
+        'Tank1': (1.6515, 3.1695),
+        'Tank2': (1.6515, 3.1695),
+    }
+
+    # update_obstacles_type()에서 매칭 실패해 pad_object()로 새로 등록할 때
+    # 쓸 obj_type. class_name -> obj_type 매핑.
+    _OBJECT_TYPE_FOR_PAD: Dict[str, str] = {
+        'Tank1': 'enemy_tank',
+        'Tank2': 'team_tank',
+    }
+
+    def handle_objects_detected(
+        self,
+        detections,
+    ) -> Dict[str, Any]:
+        """
+        인지 파이프라인이 한 프레임에 탐지한 오브젝트 여러 개를 한 번에 처리하는
+        진입점.
+
+            drive_controller.handle_objects_detected([
+                (102.0, 5.0, 103.0, "Tank1"),
+                (200.0, 5.0, 200.0, "Tank1"),
+            ])
+
+        처리 순서(백그라운드 스레드):
+            1) planner.update_obstacles_type()으로 Unity /update_obstacle가
+               이미 등록해둔 고정 오브젝트(예: 고정 배치된 Tank1 모형)와
+               좌표가 겹치는지 먼저 확인 -> 겹치면 타입만 재분류(좌표는
+               이미 정확하니 새로 만들 필요 없음)
+            2) 겹치는 기존 오브젝트가 없는 탐지(예: 실시간으로 움직이는
+               적 전차처럼 Unity가 애초에 등록 안 해주는 동적 오브젝트)는
+               pad_object() 기반의 기존 흐름(_process_object_detected)으로
+               새 장애물을 등록
+
+        Returns
+        -------
+        dict: {"status": "queued"} 고정. 실제 처리는 비동기라 이 반환값으론
+              결과를 알 수 없고, 필요하면 서버 콘솔 로그로 확인한다.
+        """
+        thread = threading.Thread(
+            target=self._process_objects_detected,
+            args=(list(detections),),
+            daemon=True,
+        )
+        thread.start()
+        return {"status": "queued"}
+
+    def _process_objects_detected(self, detections) -> None:
+        """
+        handle_objects_detected()가 백그라운드 스레드에서 실행하는 실제 로직.
+        직접 호출하지 말고 handle_objects_detected()를 통해서만 사용한다.
+        """
+        try:
+            with self.planner_lock:
+                changed_cells, unmatched = self.planner.update_obstacles_type(
+                    detections,
+                )
+
+            if changed_cells:
+                self.render_map("D* Lite Map (오브젝트 타입 갱신)")
+
+            for (x, y, z, name) in unmatched:
+                half_width, half_length = self._OBJECT_HALF_EXTENTS_M.get(
+                    name, (2.0, 3.5),
+                )
+                obj_type = self._OBJECT_TYPE_FOR_PAD.get(name, 'enemy')
+
+                # 매칭되는 기존 obstacle이 없었던 탐지 -> 새 장애물로 등록.
+                # pad_object + 경로 반응까지 처리하는 기존 로직을 그대로 재사용한다.
+                self._process_object_detected(
+                    x - half_width, x + half_width,
+                    z - half_length, z + half_length,
+                    obj_type,
+                )
+
+        except Exception as exc:
+            # 백그라운드 스레드라 예외가 호출자에게 안 올라간다. 콘솔에
+            # 남겨서 조용히 묻히지 않게 한다.
+            print(f"[_process_objects_detected] 처리 실패: {exc}")
+
     def handle_object_detected(
         self,
         x_min: float,
