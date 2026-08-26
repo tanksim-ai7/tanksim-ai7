@@ -1,295 +1,642 @@
 """
-pid_controller.py
-=================
+pid_controller_refactored.py
+============================
 
-Tank Challenge용 주행 제어 모듈.
+Tank Challenge 데모용 주행 제어 모듈.
 
+목적
+----
+기존 server_sample_v2.3.10_dstarlite_corner_proportional_v7 노트북에
+직접 들어가 있던 D* Lite 경로 추종, 속도 PID, 조향 PID, 코너 감속,
+목적지 관리, 장애물 재계획 관련 코드를 Flask 서버에서 분리한다.
 
-1. 속도 PID 제어
-2. 조향 PID 제어
-3. /info 데이터에서 현재 속도 계산
-4. 목적지까지 남은 거리에 따른 목표 속도 계산
-5. D* Lite 경로의 Look-ahead point 선택
-6. 경로의 앞쪽 코너 탐색
-7. 코너 진입 속도 제한
-8. 차체 방향이 경로와 어긋난 경우 전진 출력 제한
-9. 서버가 반환할 moveWS / moveAD 명령 생성
-10. /get_action 제어 주기(dt) 관리
-11. 목적지 변경 감지 및 PID 상태 초기화
-12. 목적지 도착 latch 및 최종 제동 상태 관리
+Flask 서버는 TankDriveController 인스턴스를 하나 만든 뒤 아래 메서드만 호출하면 된다.
 
+    handle_info(data)
+    get_action(data)
+    handle_set_destination(data)
+    handle_update_obstacles(data)
+    initialize(start_position, destination)
+    render_map(title)
+
+현재 제어식과 주요 파라미터는 업로드된
+server_sample_v2.3.10_dstarlite_corner_proportional_v7 (6)(2).ipynb 기준으로 유지했다.
 """
 
-# 거리, 각도, 속도 계산에 sqrt, hypot, atan2, radians 등이 필요하다.
 import math
-
-# /info 위치 변화량으로 속도를 계산할 때 실제 시간 간격 dt가 필요하다.
 import time
 import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from move.dstar_lite_planner_cost import ObstacleRect
 from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 
 
 # ============================================================
-# 1. 직선 주행용 속도 PID + 목적지 정지 제어 파라미터
+# 공통 타입 설명
 # ============================================================
 
-# 전차가 직선에서 목표로 하는 최고 속도 [km/h].
-# 속도 PID가 아무리 큰 가속 명령을 만들어도 목표속도는 기본적으로 이 값을 넘지 않는다.
-MAX_SPEED_KMH = 60.0
-
-# 물리식 v^2 = 2ad에서 km/h 대신 m/s를 사용하기 위해 변환한 최고속도.
-# 60 km/h / 3.6 = 약 16.67 m/s.
-MAX_SPEED_MPS = MAX_SPEED_KMH / 3.6
-
-# 계획상 사용할 평균 감속도 [m/s^2].
-# 실제 S 입력 weight가 아니라 "이 정도 감속할 수 있다"고 제어기가 가정하는 값이다.
-# 값이 작을수록 필요한 제동거리가 길어져 더 일찍 감속한다.
-# 값이 클수록 늦게 감속한다.
-PLANNED_BRAKE_DECEL_MPS2 = 2.0
-
-# 목적지/제동 계산에 추가하는 안전 여유거리 [m].
-# 계산된 제동거리보다 이 거리만큼 더 일찍 감속하도록 하기 위한 값이다.
-BRAKE_MARGIN_M = 5.0
-
-# 목적지에서 이 거리 이내로 들어오면 도착 영역으로 판단하는 기준 [m].
-STOP_DISTANCE_M = 1.0
-
-# 실제 속도가 이 값 이하이면 사실상 정지 상태로 볼 수 있는 기준 [km/h].
-STOP_SPEED_KMH = 1.0
-
-# 최고속도 근처에서 과도한 가속을 방지하기 위한 속도 기준 [km/h].
-# 서버의 longitudinal 제어 로직에서 사용한다.
-SPEED_LIMIT_START_KMH = 58.0
-
-# 목적지 최종 제동 시 S 명령을 유지할 최대 시간 [sec].
-# 시뮬레이터에서 S는 브레이크이면서 동시에 후진 명령이므로
-# 너무 오래 보내면 정지 후 후진할 수 있어 시간을 제한한다.
-FINAL_BRAKE_DURATION_SEC = 0.8
-
-# 목적지 최종 제동 시 사용할 S 명령의 weight.
-# 0~1 범위이며 값이 클수록 강한 제동 입력이다.
-FINAL_BRAKE_WEIGHT = 0.60
-
-# 속도 PID의 P gain.
-# 현재 목표속도와 실제속도의 오차에 즉각 비례해서 반응한다.
-SPEED_KP = 0.12
-
-# 속도 PID의 I gain.
-# 오랫동안 남아 있는 속도 오차를 누적하여 보상한다.
-SPEED_KI = 0.004
-
-# 속도 PID의 D gain.
-# 속도 오차가 얼마나 빠르게 변하는지 보고 급격한 변화/오버슈트를 완화한다.
-SPEED_KD = 0.02
+# X-Z 평면상의 월드 좌표 [m].
+PointXZ = Tuple[float, float]
 
 
 # ============================================================
-# 2. D* Lite 경로 추종용 조향 제어 파라미터
+# 공통 수학 보조 함수
 # ============================================================
 
-# 현재 위치에서 D* Lite 경로를 따라 기본적으로 몇 m 앞을 바라볼지 결정한다.
-LOOKAHEAD_BASE_M = 3.0
-
-# 현재 속도[km/h]가 증가할 때 Look-ahead 거리를 얼마나 증가시킬지 결정한다.
-# 실제 계산식:
-# lookahead = LOOKAHEAD_BASE_M + LOOKAHEAD_SPEED_GAIN * current_speed_kmh
-LOOKAHEAD_SPEED_GAIN = 0.08
-
-# Look-ahead가 너무 짧아져 경로의 바로 앞 점만 추종하는 것을 막는 최소값 [m].
-LOOKAHEAD_MIN_M = 3.0
-
-# Look-ahead가 너무 길어져 코너 안쪽을 크게 잘라먹는 것을 막는 최대값 [m].
-LOOKAHEAD_MAX_M = 7.0
-
-# 조향 PID의 P gain.
-# 목표 heading과 현재 차체 yaw의 각도 오차에 비례해 A/D 조향량을 결정한다.
-STEER_KP = 0.025
-
-# 조향 PID의 I gain.
-# 현재는 0이므로 조향에서는 적분항을 사실상 사용하지 않는다.
-STEER_KI = 0.0
-
-# 조향 PID의 D gain.
-# 방향 오차가 빠르게 변할 때 조향 출력을 완화하여 흔들림을 줄인다.
-STEER_KD = 0.003
-
-# 방향 오차가 이 각도 이하이면 조향하지 않는다 [deg].
-# 작은 노이즈 때문에 A/D가 계속 번갈아 입력되는 것을 방지한다.
-STEER_DEADBAND_DEG = 1.5
-
-# A/D 조향 weight의 최대값.
-# PID 출력이 너무 커져도 조향 명령은 최대 0.85까지만 사용한다.
-STEER_MAX_WEIGHT = 0.85
-
-
-# ============================================================
-# 3. 다가오는 코너 선행 감속 파라미터
-# ============================================================
-
-# 현재 위치에서 경로 앞쪽 몇 m까지 코너를 탐색할지 결정한다.
-CORNER_PREVIEW_DISTANCE_M = 50.0
-
-# 경로 방향 변화가 이 각도 이상일 때만 의미 있는 코너로 판단한다 [deg].
-# D* Lite 경로의 작은 꺾임/격자 노이즈를 모두 코너로 처리하지 않기 위한 기준이다.
-CORNER_ANGLE_THRESHOLD_DEG = 20.0
-
-# 코너 각도를 계산할 때 후보점 바로 앞/뒤 한 칸이 아니라
-# 약 몇 m 떨어진 방향을 비교할지 결정한다.
-# D* Lite의 계단식 경로로 인한 각도 노이즈를 줄인다.
-CORNER_DIRECTION_SAMPLE_M = 3.0
-
-# 이 각도 이상이면 급격한 코너(Sharp)로 분류한다.
-SHARP_CORNER_ANGLE_DEG = 70.0
-
-# 이 각도 이상이고 Sharp 미만이면 중간 코너(Medium)로 분류한다.
-MEDIUM_CORNER_ANGLE_DEG = 40.0
-
-# 코너까지 8m 이내이면 Near 영역으로 본다.
-CORNER_NEAR_DISTANCE_M = 8.0
-
-# 코너까지 18m 이내이면 Mid 영역으로 본다.
-CORNER_MID_DISTANCE_M = 18.0
-
-# 코너까지 35m 이내이면 Far 영역으로 본다.
-CORNER_FAR_DISTANCE_M = 35.0
-
-# Sharp 코너가 Near 영역에 있을 때 허용할 최대 목표속도 [km/h].
-SHARP_CORNER_SPEED_NEAR_KMH = 8.0
-
-# Sharp 코너가 Mid 영역에 있을 때 허용할 최대 목표속도 [km/h].
-SHARP_CORNER_SPEED_MID_KMH = 18.0
-
-# Sharp 코너가 Far 영역에 있을 때 허용할 최대 목표속도 [km/h].
-SHARP_CORNER_SPEED_FAR_KMH = 35.0
-
-# Medium 코너가 Near 영역에 있을 때 허용할 최대 목표속도 [km/h].
-MEDIUM_CORNER_SPEED_NEAR_KMH = 12.0
-
-# Medium 코너가 Mid 영역에 있을 때 허용할 최대 목표속도 [km/h].
-MEDIUM_CORNER_SPEED_MID_KMH = 23.0
-
-# Medium 코너가 Far 영역에 있을 때 허용할 최대 목표속도 [km/h].
-MEDIUM_CORNER_SPEED_FAR_KMH = 40.0
-
-# 20~40도 수준의 완만한 코너가 매우 가까울 때 적용할 제한속도 [km/h].
-GENTLE_CORNER_SPEED_NEAR_KMH = 30.0
-
-
-# ============================================================
-# 4. 공통 보조 함수
-# ============================================================
-
-def clamp(value, minimum, maximum):
+def clamp(value: float, minimum: float, maximum: float) -> float:
     """
-    value가 지정 범위를 벗어나지 않도록 제한한다.
+    값을 minimum ~ maximum 범위로 제한한다.
 
-    예:
-        clamp(1.4, 0.0, 1.0) -> 1.0
-        clamp(-0.2, 0.0, 1.0) -> 0.0
+    Args:
+        value:
+            제한할 원본 값.
+        minimum:
+            허용할 최소값.
+        maximum:
+            허용할 최대값.
+
+    Returns:
+        minimum <= 결과 <= maximum 인 실수.
     """
-
-    # min(value, maximum)으로 상한을 제한한 뒤,
-    # max(minimum, ...)으로 하한도 제한한다.
     return max(minimum, min(maximum, value))
 
 
+def normalize_angle_deg(angle: float) -> float:
+    """
+    각도를 -180 ~ +180 deg 범위로 정규화한다.
+
+    Args:
+        angle:
+            정규화할 각도 [deg].
+
+    Returns:
+        -180 <= angle < 180 범위의 각도 [deg].
+    """
+    return (float(angle) + 180.0) % 360.0 - 180.0
+
+
+def extract_speed_from_info(data: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+    """
+    /info JSON에서 시뮬레이터가 직접 제공하는 속도값을 읽는다.
+
+    시뮬레이터가 제공하는 속도값의 단위를 m/s로 간주하고 km/h로 변환한다.
+
+    Args:
+        data:
+            /info endpoint에서 받은 JSON dictionary.
+
+    Returns:
+        (speed_kmh, source_key)
+        사용할 수 있는 속도 필드가 없으면 (None, None).
+    """
+    # 시뮬레이터 버전에 따라 속도 key 이름이 다를 수 있어 순서대로 확인한다.
+    keys = ("PlayerSpeed", "playerSpeed", "speed", "velocity")
+
+    for key in keys:
+        if key in data and data[key] is not None:
+            try:
+                # 후진 속도가 음수여도 속력의 크기만 사용하고 m/s -> km/h로 변환한다.
+                return float(data[key]) * 3.6, key
+            except (TypeError, ValueError):
+                pass
+
+    return None, None
+
+
+def project_position_to_segment(
+    current_position: Sequence[float],
+    segment_start: Sequence[float],
+    segment_end: Sequence[float],
+) -> Tuple[PointXZ, float, float]:
+    """
+    현재 차량 위치를 D* Lite path segment 위에 투영한다.
+
+    Args:
+        current_position:
+            현재 차량 X-Z 월드 좌표 [m].
+        segment_start:
+            segment 시작 X-Z 좌표 [m].
+        segment_end:
+            segment 끝 X-Z 좌표 [m].
+
+    Returns:
+        projection:
+            segment 위 투영점 [m].
+        t:
+            segment 내부 비율. 0은 시작점, 1은 끝점.
+        distance:
+            현재 위치와 projection 사이 거리 [m].
+    """
+    cx, cz = map(float, current_position)
+    x1, z1 = map(float, segment_start)
+    x2, z2 = map(float, segment_end)
+
+    # segment 방향 벡터.
+    segment_dx = x2 - x1
+    segment_dz = z2 - z1
+
+    # segment 길이의 제곱 [m^2].
+    segment_length_sq = (
+        segment_dx * segment_dx
+        + segment_dz * segment_dz
+    )
+
+    # 시작점과 끝점이 같은 비정상 segment 처리.
+    if segment_length_sq <= 1e-12:
+        projection = (x1, z1)
+        distance = math.hypot(cx - x1, cz - z1)
+        return projection, 0.0, distance
+
+    # 무한 직선 기준 투영 비율.
+    raw_t = (
+        (cx - x1) * segment_dx
+        + (cz - z1) * segment_dz
+    ) / segment_length_sq
+
+    # 실제 유한 segment 내부로 제한한다.
+    t = clamp(raw_t, 0.0, 1.0)
+
+    projection_x = x1 + t * segment_dx
+    projection_z = z1 + t * segment_dz
+
+    distance = math.hypot(
+        cx - projection_x,
+        cz - projection_z,
+    )
+
+    return (projection_x, projection_z), t, distance
+
+
+def has_passed_segment_end(
+    current_position: Sequence[float],
+    segment_start: Sequence[float],
+    segment_end: Sequence[float],
+) -> bool:
+    """
+    차량이 segment 진행 방향 기준으로 끝점을 실제로 통과했는지 판단한다.
+
+    Args:
+        current_position:
+            현재 차량 X-Z 좌표 [m].
+        segment_start:
+            segment 시작점 [m].
+        segment_end:
+            segment 끝점 [m].
+
+    Returns:
+        True:
+            segment 끝점을 진행 방향으로 통과함.
+        False:
+            아직 끝점 이전에 있음.
+    """
+    cx, cz = map(float, current_position)
+    x1, z1 = map(float, segment_start)
+    x2, z2 = map(float, segment_end)
+
+    segment_dx = x2 - x1
+    segment_dz = z2 - z1
+
+    # 현재 위치가 끝점보다 진행방향 쪽에 있는지 dot product로 판정한다.
+    pass_dot = (
+        (cx - x2) * segment_dx
+        + (cz - z2) * segment_dz
+    )
+
+    return pass_dot > 0.0
+
+
+def select_lookahead_point(
+    path: Sequence[Sequence[float]],
+    current_position: Sequence[float],
+    lookahead_distance: float,
+) -> Tuple[Optional[PointXZ], Optional[int]]:
+    """
+    D* Lite 압축 경로에서 현재 active segment를 찾고 look-ahead target을 계산한다.
+
+    현재 서버 복구본과 동일하게 look-ahead target은 현재 segment의 다음 vertex를
+    넘어가지 않는다.
+
+    Args:
+        path:
+            D* Lite가 반환한 압축 X-Z 경로.
+        current_position:
+            현재 차량 X-Z 좌표 [m].
+        lookahead_distance:
+            현재 위치에서 경로 진행 방향으로 바라볼 거리 [m].
+
+    Returns:
+        target_point:
+            조향 PID가 바라볼 X-Z 좌표 [m].
+        target_index:
+            현재 active segment의 다음 D* Lite vertex index.
+    """
+    if path is None or len(path) == 0:
+        return None, None
+
+    if len(path) == 1:
+        return (
+            (float(path[0][0]), float(path[0][1])),
+            0,
+        )
+
+    # 차량과 가장 가까운 path segment를 찾는다.
+    nearest_segment_index = None
+    nearest_segment_distance = float("inf")
+
+    for segment_index in range(len(path) - 1):
+        _, _, distance_to_segment = project_position_to_segment(
+            current_position,
+            path[segment_index],
+            path[segment_index + 1],
+        )
+
+        if distance_to_segment < nearest_segment_distance:
+            nearest_segment_distance = distance_to_segment
+            nearest_segment_index = segment_index
+
+    if nearest_segment_index is None:
+        return None, None
+
+    segment_index = nearest_segment_index
+
+    # 기하학적으로 다음 segment가 더 가까워졌더라도
+    # 이전 vertex를 실제 진행방향으로 통과하기 전에는 이전 segment를 유지한다.
+    while segment_index > 0:
+        previous_start = path[segment_index - 1]
+        previous_end = path[segment_index]
+
+        if has_passed_segment_end(
+            current_position,
+            previous_start,
+            previous_end,
+        ):
+            break
+
+        segment_index -= 1
+
+    # 현재 segment 끝점을 이미 통과했다면 다음 segment로 이동한다.
+    while segment_index < len(path) - 2:
+        segment_start = path[segment_index]
+        segment_end = path[segment_index + 1]
+
+        if not has_passed_segment_end(
+            current_position,
+            segment_start,
+            segment_end,
+        ):
+            break
+
+        segment_index += 1
+
+    segment_start = path[segment_index]
+    segment_end = path[segment_index + 1]
+
+    x1, z1 = map(float, segment_start)
+    x2, z2 = map(float, segment_end)
+
+    projection, _, _ = project_position_to_segment(
+        current_position,
+        segment_start,
+        segment_end,
+    )
+
+    projection_x, projection_z = projection
+
+    segment_dx = x2 - x1
+    segment_dz = z2 - z1
+    segment_length = math.hypot(
+        segment_dx,
+        segment_dz,
+    )
+
+    if segment_length <= 1e-12:
+        return (
+            (x2, z2),
+            segment_index + 1,
+        )
+
+    unit_dx = segment_dx / segment_length
+    unit_dz = segment_dz / segment_length
+
+    # projection에서 현재 segment 끝점까지 남은 거리 [m].
+    distance_to_segment_end = math.hypot(
+        x2 - projection_x,
+        z2 - projection_z,
+    )
+
+    # 복구된 현재 로직:
+    # look-ahead가 길어도 다음 D* Lite vertex를 넘어가지 않는다.
+    target_advance_distance = min(
+        max(0.0, float(lookahead_distance)),
+        distance_to_segment_end,
+    )
+
+    target_x = (
+        projection_x
+        + unit_dx * target_advance_distance
+    )
+
+    target_z = (
+        projection_z
+        + unit_dz * target_advance_distance
+    )
+
+    target_point = (
+        target_x,
+        target_z,
+    )
+
+    target_index = segment_index + 1
+
+    return target_point, target_index
+
+
+def calculate_next_vertex_corner(
+    path: Sequence[Sequence[float]],
+    current_position: Sequence[float],
+    target_index: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """
+    현재 조향이 추종하는 다음 D* Lite vertex의 코너 정보를 계산한다.
+
+    Args:
+        path:
+            압축 D* Lite 경로.
+        current_position:
+            현재 차량 X-Z 좌표 [m].
+        target_index:
+            select_lookahead_point()가 반환한 다음 vertex index.
+
+    Returns:
+        None:
+            앞/뒤 segment를 만들 수 없을 때.
+        dict:
+            distance [m], angle [deg], radius [m], index, point를 포함한다.
+    """
+    if path is None or target_index is None:
+        return None
+
+    if (
+        target_index <= 0
+        or target_index >= len(path) - 1
+    ):
+        return None
+
+    previous_point = path[target_index - 1]
+    corner_point = path[target_index]
+    next_point = path[target_index + 1]
+
+    previous_x, previous_z = map(float, previous_point)
+    corner_x, corner_z = map(float, corner_point)
+    next_x, next_z = map(float, next_point)
+
+    # 현재 차량 위치를 코너 진입 segment 위에 투영한다.
+    projection, _, _ = project_position_to_segment(
+        current_position,
+        previous_point,
+        corner_point,
+    )
+
+    projection_x, projection_z = projection
+
+    # 현재 segment 투영점에서 코너 vertex까지 남은 거리 [m].
+    distance_to_corner = math.hypot(
+        corner_x - projection_x,
+        corner_z - projection_z,
+    )
+
+    # +Z = 0 deg, +X = +90 deg 좌표계 기준 진입/진출 heading.
+    heading_before = math.degrees(
+        math.atan2(
+            corner_x - previous_x,
+            corner_z - previous_z,
+        )
+    )
+
+    heading_after = math.degrees(
+        math.atan2(
+            next_x - corner_x,
+            next_z - corner_z,
+        )
+    )
+
+    turn_angle = abs(
+        normalize_angle_deg(
+            heading_after - heading_before
+        )
+    )
+
+    # 세 경로점을 이용한 기하학적 외접원 반경 계산.
+    # 현재 제어에서는 진단값으로만 사용하고 코너 속도식에는 직접 사용하지 않는다.
+    segment_before_length = math.hypot(
+        corner_x - previous_x,
+        corner_z - previous_z,
+    )
+
+    segment_after_length = math.hypot(
+        next_x - corner_x,
+        next_z - corner_z,
+    )
+
+    chord_length = math.hypot(
+        next_x - previous_x,
+        next_z - previous_z,
+    )
+
+    double_triangle_area = abs(
+        (corner_x - previous_x)
+        * (next_z - previous_z)
+        - (corner_z - previous_z)
+        * (next_x - previous_x)
+    )
+
+    if double_triangle_area <= 1e-9:
+        corner_radius_m = float("inf")
+    else:
+        corner_radius_m = (
+            segment_before_length
+            * segment_after_length
+            * chord_length
+            / (
+                2.0
+                * double_triangle_area
+            )
+        )
+
+    return {
+        "distance": distance_to_corner,
+        "angle": turn_angle,
+        "radius": corner_radius_m,
+        "index": target_index,
+        "point": (
+            corner_x,
+            corner_z,
+        ),
+    }
+
+
+def make_stop_command() -> Dict[str, Any]:
+    """
+    모든 주행/조향 입력을 해제한 안전 정지 명령을 반환한다.
+
+    Returns:
+        Flask 서버가 그대로 jsonify할 수 있는 command dictionary.
+    """
+    return {
+        "moveWS": {"command": "", "weight": 0.0},
+        "moveAD": {"command": "", "weight": 0.0},
+        "turretQE": {"command": "", "weight": 0.0},
+        "turretRF": {"command": "", "weight": 0.0},
+        "fire": False,
+    }
+
+
+def make_longitudinal_command(pid_output: float, current_speed_kmh : float) -> Dict[str, Any]:
+    """
+    속도 PID 출력을 W/S 명령으로 변환한다.
+
+    Args:
+        pid_output:
+            -1 ~ +1 범위의 속도 PID 출력.
+            양수는 W 전진 가속, 음수는 S 제동/후진 방향 입력.
+
+    Returns:
+        moveWS가 채워진 command dictionary.
+    """
+    # PID 출력이 아주 작을 때 W/S가 반복 전환되는 것을 막는 명령 deadband.
+    deadband = 0.02
+    stop_speed = 1.0
+
+    if pid_output > deadband:
+        ws_command = "W"
+        ws_weight = clamp(pid_output, 0.0, 1.0)
+
+    elif pid_output < -deadband:
+        if current_speed_kmh > stop_speed:
+            ws_command = "S"
+            ws_weight = clamp(abs(pid_output), 0.0, 1.0)
+
+        else:
+            ws_command = ""
+            ws_weight = 0.0
+
+    else:
+        ws_command= ""
+        ws_weight = 0.0
+
+    return {
+        "moveWS": {
+            "command": ws_command,
+            "weight": round(ws_weight, 4),
+        },
+        "moveAD": {"command": "", "weight": 0.0},
+        "turretQE": {"command": "", "weight": 0.0},
+        "turretRF": {"command": "", "weight": 0.0},
+        "fire": False,
+    }
+
+
 # ============================================================
-# 5. PID Controller
+# 범용 PID 제어기
 # ============================================================
 
 class PIDController:
     """
-    P + I + D 출력을 계산하는 범용 PID Controller.
+    속도 PID와 조향 PD에서 공통으로 사용하는 PID Controller.
 
-    속도 제어와 조향 제어에서 같은 클래스를 재사용한다.
+    모든 상태는 객체 내부에 저장하므로 서버 전역변수로 둘 필요가 없다.
     """
 
     def __init__(
         self,
-        kp,
-        ki,
-        kd,
-        output_min=-1.0,
-        output_max=1.0,
-        integral_min=-10.0,
-        integral_max=10.0,
-    ):
-        # 비례항 gain.
+        kp: float,
+        ki: float,
+        kd: float,
+        output_min: float = -1.0,
+        output_max: float = 1.0,
+        integral_min: float = -10.0,
+        integral_max: float = 10.0,
+    ) -> None:
+        """
+        PID gain과 출력/적분 제한값을 초기화한다.
+
+        Args:
+            kp:
+                비례 gain.
+            ki:
+                적분 gain.
+            kd:
+                미분 gain.
+            output_min:
+                최종 PID 출력 최소값.
+            output_max:
+                최종 PID 출력 최대값.
+            integral_min:
+                integral wind-up 방지용 적분 누적 최소값.
+            integral_max:
+                integral wind-up 방지용 적분 누적 최대값.
+        """
         self.kp = float(kp)
-
-        # 적분항 gain.
         self.ki = float(ki)
-
-        # 미분항 gain.
         self.kd = float(kd)
 
-        # PID 최종 출력의 최소값.
         self.output_min = float(output_min)
-
-        # PID 최종 출력의 최대값.
         self.output_max = float(output_max)
 
-        # 적분 누적값의 최소 제한.
-        # integral wind-up을 막기 위해 사용한다.
         self.integral_min = float(integral_min)
-
-        # 적분 누적값의 최대 제한.
         self.integral_max = float(integral_max)
 
-        # 현재까지 누적된 error * dt.
+        # 누적된 error * dt.
         self.integral = 0.0
 
-        # 이전 제어 주기의 error.
-        # derivative = (현재오차 - 이전오차) / dt 계산에 필요하다.
-        self.previous_error = None
+        # 직전 제어 주기의 error. D항 계산에 사용한다.
+        self.previous_error: Optional[float] = None
 
-    def reset(self):
+    def reset(self) -> None:
         """
-        새로운 목적지를 설정하거나 제어를 초기화할 때 PID 내부 상태를 비운다.
+        목적지 변경/초기화 시 PID 내부 상태를 비운다.
         """
-
-        # 누적된 I항을 제거한다.
         self.integral = 0.0
-
-        # 이전 오차를 제거하여 다음 update의 D항을 0부터 시작하게 한다.
         self.previous_error = None
 
-    def update(self, error, dt):
+    def update(self, error: float, dt: float) -> float:
         """
-        현재 error와 제어 주기 dt를 받아 PID 출력을 계산한다.
-        """
+        현재 error와 dt로 PID 출력을 계산한다.
 
-        # dt가 0에 가까우면 derivative가 폭발하므로 최소 0.001초를 보장한다.
+        Args:
+            error:
+                목표값 - 현재값.
+            dt:
+                제어 주기 [sec].
+
+        Returns:
+            output_min ~ output_max 범위의 PID 출력.
+        """
+        # 지나치게 작은 dt에서 derivative가 폭발하지 않도록 최소값을 둔다.
         dt = max(float(dt), 1e-3)
 
-        # I항용 누적 오차.
-        # 너무 크게 누적되지 않도록 integral_min~integral_max 범위로 제한한다.
         self.integral = clamp(
             self.integral + error * dt,
             self.integral_min,
             self.integral_max,
         )
 
-        # 첫 호출에서는 previous_error가 없으므로 D항을 0으로 한다.
-        # 이후부터는 오차 변화율을 계산한다.
         derivative = (
             0.0
             if self.previous_error is None
             else (error - self.previous_error) / dt
         )
 
-        # PID 기본식:
-        # output = Kp*e + Ki*∫e dt + Kd*de/dt
         output = (
             self.kp * error
             + self.ki * self.integral
             + self.kd * derivative
         )
 
-        # 다음 호출에서 derivative 계산에 사용하기 위해 현재 error를 저장한다.
         self.previous_error = error
 
-        # 서버에 보낼 weight 범위를 넘어가지 않도록 최종 PID 출력을 제한한다.
         return clamp(
             output,
             self.output_min,
@@ -297,1725 +644,1831 @@ class PIDController:
         )
 
 
-# 속도용 PID 인스턴스.
-# 출력 기본 범위는 -1~1이며,
-# +출력은 W, -출력은 S로 변환한다.
-speed_pid = PIDController(
-    SPEED_KP,
-    SPEED_KI,
-    SPEED_KD,
-)
-
-# 조향용 PID 인스턴스.
-# 좌/우 회전이 모두 필요하므로 출력은 -STEER_MAX_WEIGHT ~ +STEER_MAX_WEIGHT.
-steering_pid = PIDController(
-    STEER_KP,
-    STEER_KI,
-    STEER_KD,
-    output_min=-STEER_MAX_WEIGHT,
-    output_max=STEER_MAX_WEIGHT,
-
-    # 조향 I항은 현재 ki=0이지만,
-    # 나중에 I항을 사용할 경우를 대비해 누적범위를 별도로 설정한다.
-    integral_min=-30.0,
-    integral_max=30.0,
-)
-
-
 # ============================================================
-# 6. /info 기반 속도 상태
+# Flask 서버에서 직접 사용하는 facade 클래스
 # ============================================================
 
-# 현재 필터링된 최신 속도 [km/h].
-info_speed_kmh = None
-
-# 이전 /info 호출에서 받은 전차 위치 [x, z].
-# explicit speed가 없을 경우 위치 변화량으로 속도를 계산하는 데 사용한다.
-info_previous_position = None
-
-# 이전 /info를 처리한 시간.
-info_previous_time = None
-
-# 속도 EMA(Exponential Moving Average) 필터 계수.
-# 0.35이면 새 측정값 35%, 이전 필터값 65%를 섞는다.
-INFO_SPEED_EMA_ALPHA = 0.35
-
-
-# ============================================================
-# 6-1. /get_action 주행 제어 상태
-# ============================================================
-
-# 직전 /get_action 제어가 실행된 시각 [sec].
-#
-# time.monotonic() 값을 저장한다.
-# 다음 제어 주기에서
-#
-#     dt = now - last_control_time
-#
-# 을 계산하기 위해 필요하다.
-#
-# PID의 I항은 error * dt,
-# D항은 (error - previous_error) / dt 를 사용하므로
-# 실제 제어 호출 간격을 기억해야 한다.
-#
-# None:
-#   아직 첫 제어가 실행되지 않았거나
-#   목적지 변경/초기화 때문에 시간 기준을 새로 잡아야 하는 상태.
-last_control_time = None
-
-
-# 목적지 도착 상태를 한 번 확정했는지 저장하는 latch 변수.
-#
-# False:
-#   아직 목적지 도착으로 판단하지 않은 상태.
-#
-# True:
-#   STOP_DISTANCE_M 안에 한 번 들어온 상태.
-#
-# 한 번 True가 되면 전차가 관성으로 목적지를 조금 지나가더라도
-# 다시 일반 PID 주행으로 돌아가 W가 입력되는 것을 막는다.
-arrival_latched = False
-
-
-# 마지막으로 PID가 추종하던 목적지의 (x, z) 좌표.
-#
-# 예:
-#   (150.0, 280.0)
-#
-# 현재 목적지와 이 값이 다르면 새로운 목적지로 판단하고
-# speed_pid, steering_pid, 제어시간, 도착상태, 최종제동 상태를 초기화한다.
-#
-# None:
-#   아직 PID가 어떤 목적지도 추종하지 않았거나
-#   전체 제어 상태가 초기화된 상태.
-last_pid_destination = None
-
-
-# 목적지에 도착한 뒤 최종 S 제동을 처음 시작한 시각 [sec].
-#
-# 시뮬레이터에서 S는 단순 브레이크가 아니라 후진 명령도 겸하기 때문에
-# 계속 S를 보내면 정지 후 뒤로 움직일 수 있다.
-#
-# 따라서 최초 제동 시각을 저장하고
-# FINAL_BRAKE_DURATION_SEC 동안만 S를 허용한다.
-#
-# None:
-#   아직 최종 제동이 시작되지 않은 상태.
-final_brake_start_time = None
-
-
-def extract_speed_from_info(data):
+class TankDriveController:
     """
-    /info JSON에서 시뮬레이터가 직접 제공하는 속도값을 찾는다.
+    D* Lite 경로 계획과 PID 주행 제어를 한 객체 안에 묶는 facade 클래스.
 
-    반환:
-        (속도[km/h], 사용한 key)
+    서버 측에서는 내부 계산 함수나 상태변수를 알 필요가 없다.
 
-    현재 코드에서는 시뮬레이터 속도값을 m/s라고 가정하고 *3.6 한다.
+    권장 서버 사용법:
+
+        drive_controller = TankDriveController()
+
+        @app.route('/info', methods=['POST'])
+        def info():
+            response, status = drive_controller.handle_info(request.get_json(force=True))
+            return jsonify(response), status
+
+        @app.route('/get_action', methods=['POST'])
+        def get_action():
+            return jsonify(drive_controller.get_action(request.get_json(force=True)))
     """
 
-    # 시뮬레이터 버전/키 이름 차이에 대응하기 위해 여러 후보 key를 순서대로 검사한다.
-    keys = (
-        "PlayerSpeed",
-        "playerSpeed",
-        "speed",
-        "velocity",
-    )
+    # --------------------------------------------------------
+    # 현재 데모 제어 파라미터
+    # --------------------------------------------------------
 
-    # 후보 key를 하나씩 확인한다.
-    for key in keys:
+    # 직선 기준 최고 목표속도 [km/h].
+    MAX_SPEED_KMH = 60.0
 
-        # 해당 key가 존재하고 값도 None이 아닌 경우에만 처리한다.
-        if key in data and data[key] is not None:
-            try:
-                # abs(): 후진 속도가 음수로 전달되더라도 속력 크기만 사용.
-                # float(): JSON 숫자/문자열을 실수형으로 통일.
-                # *3.6: m/s -> km/h 변환.
-                return abs(float(data[key])) * 3.6, key
+    # 목적지/코너 제동거리 계산에서 가정하는 계획 감속도 [m/s^2].
+    PLANNED_BRAKE_DECEL_MPS2 = 1.5
 
-            # 숫자로 변환할 수 없는 값이면 다음 key를 검사한다.
-            except (TypeError, ValueError):
-                pass
+    # 목적지 중심에서 이 거리 이내면 도착 단계로 진입한다 [m].
+    STOP_DISTANCE_M = 1.0
 
-    # 사용할 수 있는 속도값을 찾지 못한 경우.
-    return None, None
+    # 도착 영역에서 이 속도 이하가 되면 이동 입력을 해제한다 [km/h].
+    STOP_SPEED_KMH = 1.0
 
+    # 속도 PID P gain.
+    SPEED_KP = 0.12
 
-def update_info_speed(data, player_position):
-    """
-    /info가 들어올 때 현재 속도 상태를 갱신한다.
+    # 속도 PID D gain. 현재 I gain은 0이므로 실질적으로 PD 제어다.
+    SPEED_KD = 0.02
 
-    우선순위:
-    1. /info에 명시적 속도 필드가 있으면 그것을 사용.
-    2. 없으면 현재 위치와 이전 위치의 차이 / dt로 속도를 추정.
+    # 정지/직선 구간의 기본 look-ahead 거리 [m].
+    LOOKAHEAD_BASE_M = 3.0
 
-    player_position은 [x, z] 형태를 기대한다.
-    """
+    # 현재 속도 [km/h]에 따라 look-ahead를 증가시키는 비례계수 [m/(km/h)].
+    LOOKAHEAD_SPEED_GAIN = 0.08
 
-    # 이 함수 호출 사이에도 상태를 유지해야 하므로 module global 값을 사용한다.
-    global info_speed_kmh
-    global info_previous_position
-    global info_previous_time
+    # 조향 PID P gain.
+    STEER_KP = 0.025
 
-    # 현재 시간을 monotonic clock으로 얻는다.
-    # 시스템 시간이 변경되어도 시간차 계산이 안정적이다.
-    now = time.monotonic()
+    # 조향 PID D gain. 현재 I gain은 0이다.
+    STEER_KD = 0.003
 
-    # /info에서 직접 속도 필드를 먼저 찾는다.
-    explicit_speed_kmh, speed_key = extract_speed_from_info(
-        data
-    )
+    # moveAD 조향 weight 최대값.
+    STEER_MAX_WEIGHT = 0.85
 
-    # 직접 속도가 있으면 우선 사용한다.
-    measured_speed_kmh = explicit_speed_kmh
+    # /info 위치 기반 속도 fallback의 EMA 신규 측정값 비율.
+    INFO_SPEED_EMA_ALPHA = 0.35
 
-    # 로그에서 속도가 어느 데이터로 계산됐는지 확인하기 위한 source.
-    speed_source = speed_key
+    def __init__(
+        self,
+        path_planner: DStarLitePlanner,
+        map_image_path: str = "dstar_map.png",
+    ) -> None:
+        """
+        주행 제어기 상태를 초기화한다.
 
-    # 직접 속도값이 없고,
-    # 이전 위치와 이전 시간이 모두 존재할 때만 위치 기반 속도를 계산한다.
-    if (
-        measured_speed_kmh is None
-        and info_previous_position is not None
-        and info_previous_time is not None
-    ):
-        # 두 /info 처리 시점 사이의 시간차 [sec].
-        dt = now - info_previous_time
+        Args:
+            path_planner:
+                서버에서 생성한 DStarLitePlanner 또는 RiskDStarPlanner.
+                경로계획 파라미터는 planner가 소유하며
+                PID Controller에서 중복 정의하지 않는다.
 
-        # 너무 짧은 dt는 노이즈가 커지고,
-        # 너무 긴 dt는 실제 순간속도를 잘 표현하지 못하므로 범위를 제한한다.
-        if 0.01 <= dt <= 1.0:
-
-            # X축 이동량.
-            dx = (
-                float(player_position[0])
-                - float(info_previous_position[0])
+            map_image_path:
+                D* Lite 경로 시각화 PNG 저장 경로.
+        """
+        # 서버에서 생성한 planner 하나를 그대로 공유한다.
+        # PID Controller 내부에서 planner 설정값을 다시 하드코딩하지 않는다.
+        if path_planner is None:
+            raise ValueError(
+                "TankDriveController requires path_planner."
             )
 
-            # Z축 이동량.
-            dz = (
-                float(player_position[1])
-                - float(info_previous_position[1])
-            )
+        self.stop_flag = False
 
-            # 평면 이동거리 / 시간 = m/s,
-            # 여기에 *3.6하여 km/h로 변환한다.
-            measured_speed_kmh = (
-                math.hypot(dx, dz)
-                / dt
-                * 3.6
-            )
+        self.planner = path_planner
 
-            # 디버깅 로그에서 위치 기반 계산임을 알 수 있게 표시한다.
-            speed_source = "playerPos/dt"
+        # Flask threaded 모드에서 obstacle/path 갱신이 겹치지 않도록 planner 접근을 보호한다.
+        self.planner_lock = threading.RLock()
 
-    # 다음 호출의 속도 계산을 위해 현재 위치를 저장한다.
-    info_previous_position = [
-        float(player_position[0]),
-        float(player_position[1]),
-    ]
+        # D* Lite 경로 시각화 파일 경로.
+        self.map_image_path = str(map_image_path)
 
-    # 다음 호출의 dt 계산을 위해 현재 시간을 저장한다.
-    info_previous_time = now
+        # 현재 설정 목적지 [x, z] [m].
+        self.dest: Optional[List[float]] = None
 
-    # 이번 호출에서 사용할 수 있는 속도값을 얻은 경우만 필터를 갱신한다.
-    if measured_speed_kmh is not None:
+        # 가장 최근 차량 위치 [x, z] [m].
+        self.current_pos: Optional[List[float]] = None
 
-        # 첫 측정이라 이전 EMA 값이 없으면 측정값을 그대로 초기값으로 사용한다.
-        if info_speed_kmh is None:
-            info_speed_kmh = measured_speed_kmh
+        # 현재 D* Lite가 반환한 압축 경로.
+        self.current_path: List[PointXZ] = []
 
-        else:
-            # EMA:
-            # new_filtered
-            # = alpha * new_measurement
-            # + (1-alpha) * previous_filtered
-            #
-            # 순간적인 통신/측정 노이즈를 완화한다.
-            info_speed_kmh = (
-                INFO_SPEED_EMA_ALPHA
-                * measured_speed_kmh
-                + (
-                    1.0
-                    - INFO_SPEED_EMA_ALPHA
-                )
-                * info_speed_kmh
-            )
+        # 가장 최근 /info JSON 전체.
+        self.latest_info: Dict[str, Any] = {}
 
-    # 현재 필터링된 속도와 속도 출처를 함께 반환한다.
-    return info_speed_kmh, speed_source
+        # /info에서 계산/필터링한 현재 속도 [km/h].
+        self.info_speed_kmh: Optional[float] = None
 
+        # 위치 기반 속도 fallback 계산에 사용하는 직전 차량 위치 [x, z] [m].
+        self.info_previous_position: Optional[List[float]] = None
 
-def read_player_speed_kmh():
-    """
-    다른 서버 코드가 현재 PID 모듈에 저장된 최신 속도를 읽을 때 사용한다.
-    """
+        # 위치 기반 속도 fallback 계산에 사용하는 직전 /info 시간 [sec, monotonic].
+        self.info_previous_time: Optional[float] = None
 
-    return info_speed_kmh
+        # 사격팀 보정용 실제 차체 각속도 계산에 사용하는
+        # 직전 /info 차체 yaw [deg].
+        self.fire_previous_body_yaw_deg: Optional[float] = None
 
+        # 사격팀 보정용 실제 차체 각속도 계산에 사용하는
+        # 직전 /info 수신 시간 [sec, monotonic].
+        self.fire_previous_body_yaw_time: Optional[float] = None
 
-# ============================================================
-# 6-2. /get_action 제어 상태 관리 함수
-# ============================================================
+        # 연속된 /info의 playerBodyX 변화량으로 계산한
+        # 현재 차체 yaw rate [deg/s].
+        self.fire_body_rate_dps: float = 0.0
 
-def reset_control_state(reset_destination=True):
-    """
-    PID와 /get_action에서 사용하는 주행 제어 상태를 초기화한다.
+        # 직전 /get_action 제어 실행 시간 [sec, monotonic].
+        self.last_control_time: Optional[float] = None
 
-    Parameters
-    ----------
-    reset_destination : bool
-        True:
-            last_pid_destination까지 None으로 초기화한다.
-            /init, episode 재시작, 전체 주행 초기화에서 사용한다.
+        # 목적지 반경에 한 번 진입한 뒤 다시 일반주행으로 복귀하지 않도록 유지하는 latch.
+        self.arrival_latched = False
 
-        False:
-            현재 목적지 정보는 유지하고
-            PID/시간/도착/최종제동 상태만 초기화한다.
+        # PID가 마지막으로 추종하던 목적지 signature.
+        self.last_pid_destination: Optional[Tuple[float, float]] = None
 
-    초기화되는 항목
-    ----------------
-    speed_pid
-        속도 PID의 integral, previous_error 초기화.
-
-    steering_pid
-        조향 PID의 integral, previous_error 초기화.
-
-    last_control_time
-        다음 get_control_dt() 호출을 첫 제어 주기로 만든다.
-
-    arrival_latched
-        이전 목적지의 도착 판정을 제거한다.
-
-    final_brake_start_time
-        이전 목적지의 최종 제동 timer를 제거한다.
-
-    last_pid_destination
-        reset_destination=True일 때만 제거한다.
-
-    왜 필요한가
-    -----------
-    이전 목적지나 이전 episode에서 남은 PID/제동 상태가
-    새로운 주행에 섞이는 것을 막기 위해 사용한다.
-    """
-    global last_control_time
-    global arrival_latched
-    global last_pid_destination
-    global final_brake_start_time
-
-    # 속도 PID 내부 누적 상태 초기화.
-    speed_pid.reset()
-
-    # 조향 PID 내부 누적 상태 초기화.
-    steering_pid.reset()
-
-    # 다음 제어에서 dt를 새로 시작하도록 시간 기준 제거.
-    last_control_time = None
-
-    # 이전 목적지의 도착 판정 제거.
-    arrival_latched = False
-
-    # 이전 목적지의 최종 S 제동 timer 제거.
-    final_brake_start_time = None
-
-    # 전체 초기화일 때만 마지막 목적지 기억도 제거.
-    if reset_destination:
-        last_pid_destination = None
-
-
-def get_control_dt():
-    """
-    현재 /get_action 제어 주기의 dt를 계산한다.
-
-    Returns
-    -------
-    now : float
-        time.monotonic()으로 얻은 현재 제어 시각 [sec].
-
-    dt : float
-        직전 제어와 현재 제어 사이의 시간 간격 [sec].
-
-    계산 방식
-    ---------
-    첫 호출:
-        last_control_time이 None이므로 0.05 sec를 사용한다.
-
-    이후 호출:
-        now - last_control_time을 실제 dt로 사용한다.
-
-    최종적으로 0.01 ~ 0.25 sec 범위로 제한한다.
-
-    왜 필요한가
-    -----------
-    PID의 적분항과 미분항은 시간 간격 dt가 필요하다.
-
-        I = integral + error * dt
-        D = (error - previous_error) / dt
-
-    통신 지연 때문에 dt가 지나치게 커지거나,
-    호출 간격이 너무 짧아 dt가 거의 0이 되는 경우
-    PID 출력이 불안정해질 수 있으므로 범위를 제한한다.
-    """
-    global last_control_time
-
-    # 현재 제어 시각.
-    now = time.monotonic()
-
-    # 첫 호출은 안정적인 기본 주기 0.05 sec 사용.
-    if last_control_time is None:
-        dt = 0.05
-
-    else:
-        # 실제 제어 호출 간격을 구하고 비정상적인 값을 제한한다.
-        dt = clamp(
-            now - last_control_time,
-            0.01,
-            0.25,
+        # 속도 제어용 PID. I gain은 현재 notebook과 동일하게 0.
+        self.speed_pid = PIDController(
+            self.SPEED_KP,
+            0.0,
+            self.SPEED_KD,
         )
 
-    # 다음 제어 주기에서 사용할 현재 시각 저장.
-    last_control_time = now
-
-    return now, dt
-
-
-def check_destination_change(destination):
-    """
-    현재 목적지가 이전 PID 제어 목적지와 달라졌는지 확인한다.
-
-    Parameters
-    ----------
-    destination : sequence | None
-        현재 목적지의 [x, z] 또는 (x, z).
-
-        destination[0]:
-            목적지 x 좌표.
-
-        destination[1]:
-            목적지 z 좌표.
-
-    Returns
-    -------
-    bool
-        True:
-            목적지가 변경되어 PID/제어 상태를 초기화한 경우.
-
-        False:
-            이전과 같은 목적지를 계속 추종 중인 경우.
-
-    동작
-    ----
-    현재 목적지를 소수점 셋째 자리까지 반올림하여
-    last_pid_destination과 비교한다.
-
-    목적지가 변경되면:
-        1. speed_pid.reset()
-        2. steering_pid.reset()
-        3. last_control_time = None
-        4. arrival_latched = False
-        5. final_brake_start_time = None
-        6. last_pid_destination = 새 목적지
-
-    왜 필요한가
-    -----------
-    이전 목적지를 따라가면서 누적된 PID의 I/D 상태와
-    도착/제동 상태를 새 목적지에 그대로 사용하면
-    첫 제어 출력이 튀거나 출발하지 못할 수 있기 때문이다.
-    """
-    global last_control_time
-    global arrival_latched
-    global last_pid_destination
-    global final_brake_start_time
-
-    # 목적지가 없으면 비교할 수 없으므로
-    # 마지막 목적지 상태를 제거하고 제어 상태를 초기화한다.
-    if destination is None:
-        reset_control_state(
-            reset_destination=True
+        # 조향 제어용 PID. 출력은 실제 moveAD 허용 범위로 제한한다.
+        self.steering_pid = PIDController(
+            self.STEER_KP,
+            0.0,
+            self.STEER_KD,
+            output_min=-self.STEER_MAX_WEIGHT,
+            output_max=self.STEER_MAX_WEIGHT,
+            integral_min=-30.0,
+            integral_max=30.0,
         )
-        return False
 
-    # 미세한 실수 오차 때문에 같은 목적지를 다른 값으로
-    # 판단하지 않도록 소수점 셋째 자리까지 반올림한다.
-    destination_signature = (
-        round(float(destination[0]), 3),
-        round(float(destination[1]), 3),
-    )
+    # --------------------------------------------------------
+    # 내부 상태 관리
+    # --------------------------------------------------------
 
-    # 이전 목적지와 같으면 아무것도 초기화하지 않는다.
-    if destination_signature == last_pid_destination:
-        return False
+    def _reset_control_state(
+        self,
+        reset_destination_signature: bool = True,
+    ) -> None:
+        """
+        PID와 시간/도착 상태를 초기화한다.
 
-    # 새로운 목적지이면 PID 내부 상태 초기화.
-    speed_pid.reset()
-    steering_pid.reset()
+        Args:
+            reset_destination_signature:
+                True이면 마지막 목적지 signature도 제거한다.
+        """
+        self.speed_pid.reset()
+        self.steering_pid.reset()
 
-    # 새로운 목적지 기준으로 제어 시간과 도착/제동 상태 초기화.
-    last_control_time = None
-    arrival_latched = False
-    final_brake_start_time = None
+        self.last_control_time = None
+        self.arrival_latched = False
 
-    # 앞으로 비교할 수 있도록 새 목적지 저장.
-    last_pid_destination = destination_signature
+        if reset_destination_signature:
+            self.last_pid_destination = None
 
-    return True
+    def _reset_info_state(self) -> None:
+        """
+        /info 기반 속도 필터 상태를 초기화한다.
+        """
+        self.info_speed_kmh = None
+        self.info_previous_position = None
+        self.info_previous_time = None
 
+        # 이전 episode의 yaw 변화량이 새 episode에 섞이지 않도록 초기화한다.
+        self.fire_previous_body_yaw_deg = None
+        self.fire_previous_body_yaw_time = None
+        self.fire_body_rate_dps = 0.0
 
-def update_arrival_state(
-    distance_to_goal,
-    current_speed_kmh,
-    now=None,
-):
-    """
-    목적지 도착 latch와 최종 S 제동 상태를 처리한다.
+        self.latest_info = {}
 
-    Parameters
-    ----------
-    distance_to_goal : float
-        현재 전차 위치에서 최종 목적지까지의 거리 [m].
+    # --------------------------------------------------------
+    # /info 처리
+    # --------------------------------------------------------
 
-    current_speed_kmh : float
-        현재 전차 속도 [km/h].
+    def _update_info_speed(
+        self,
+        data: Dict[str, Any],
+        player_position: Sequence[float],
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """
+        /info에서 현재 속도를 갱신한다.
 
-    now : float | None
-        현재 제어 시각.
-        일반적으로 get_control_dt()에서 반환된 now를 그대로 넘긴다.
-        None이면 함수 내부에서 time.monotonic()을 호출한다.
+        우선순위:
+            1. playerSpeed 등 명시적 속도 필드.
+            2. 없으면 연속 위치 변화량 / dt.
 
-    Returns
-    -------
-    None
-        아직 목적지 도착 상태가 아니다.
-        서버는 일반 PID 주행을 계속하면 된다.
+        Args:
+            data:
+                /info JSON.
+            player_position:
+                현재 차량 [x, z] 위치 [m].
 
-    dict
-        목적지 도착 상태일 때 사용할 command.
-
-        속도가 남아 있고 최종 제동 허용시간 안:
-            S 제동 command 반환.
-
-        충분히 느려졌거나 제동시간 종료:
-            모든 입력을 해제한 stop command 반환.
-
-    동작 순서
-    ---------
-    1. distance_to_goal <= STOP_DISTANCE_M 이면 도착 판정.
-    2. arrival_latched = True로 고정.
-    3. 최초 도착 시 final_brake_start_time 저장.
-    4. FINAL_BRAKE_DURATION_SEC 동안만 S 제동.
-    5. 이후에는 S를 끄고 정지 command 반환.
-
-    왜 필요한가
-    -----------
-    전차가 목적지를 살짝 지나쳤다고 다시 W를 주는 것을 막고,
-    S를 너무 오래 보내 정지 후 후진하는 것도 막기 위해 필요하다.
-    """
-    global arrival_latched
-    global final_brake_start_time
-
-    # 제어 시각이 외부에서 전달되지 않았으면 현재 시각 사용.
-    if now is None:
+        Returns:
+            (필터링된 속도 [km/h], 측정 source 문자열)
+        """
         now = time.monotonic()
 
-    distance_to_goal = float(distance_to_goal)
-    current_speed_kmh = float(current_speed_kmh)
+        explicit_speed_kmh, speed_key = extract_speed_from_info(data)
 
-    # 아직 도착한 적이 없고 목적지 반경 밖이면 일반 주행 계속.
-    if (
-        not arrival_latched
-        and distance_to_goal > STOP_DISTANCE_M
-    ):
-        return None
+        measured_speed_kmh = explicit_speed_kmh
+        speed_source = speed_key
 
-    # 목적지 반경에 한 번 들어오면 도착 상태를 고정한다.
-    arrival_latched = True
-
-    # 최초 도착 순간에만 최종 제동 시작 시각 기록.
-    if final_brake_start_time is None:
-        final_brake_start_time = now
-
-    # 최종 제동을 시작한 뒤 지난 시간.
-    final_brake_elapsed = (
-        now - final_brake_start_time
-    )
-
-    # 아직 충분히 느려지지 않았고,
-    # 허용된 최종 제동 시간 안이면 S 제동.
-    if (
-        current_speed_kmh > STOP_SPEED_KMH
-        and final_brake_elapsed < FINAL_BRAKE_DURATION_SEC
-    ):
-        return make_longitudinal_command(
-            -FINAL_BRAKE_WEIGHT
-        )
-
-    # 충분히 느려졌거나 제동 제한시간이 지나면
-    # S를 더 보내지 않고 모든 입력을 해제한다.
-    return make_stop_command()
-
-
-# ============================================================
-# 7. 목적지까지 남은 거리에 따른 목표 속도
-# ============================================================
-
-def calculate_target_speed_kmh(distance_m):
-    """
-    목적지까지 남은 거리에서 정지할 수 있는 최대 허용속도를 계산한다.
-
-    사용식:
-        v^2 = 2*a*d
-        v = sqrt(2*a*d)
-
-    멀리 있으면 MAX_SPEED_KMH까지 허용하고,
-    목적지에 가까워질수록 목표속도를 연속적으로 낮춘다.
-    """
-
-    # STOP_DISTANCE_M 안쪽은 이미 도착 영역으로 취급하기 때문에
-    # 실제 감속 계산에 사용할 수 있는 거리에서 빼준다.
-    usable_distance = max(
-        0.0,
-        float(distance_m) - STOP_DISTANCE_M,
-    )
-
-    # 현재 남은 거리에서 정지하기 위해 허용 가능한 속도[m/s].
-    braking_speed_mps = math.sqrt(
-        2.0
-        * PLANNED_BRAKE_DECEL_MPS2
-        * usable_distance
-    )
-
-    # 물리식이 매우 큰 속도를 허용하더라도 최고속도는 넘지 않게 한다.
-    target_speed_mps = min(
-        MAX_SPEED_MPS,
-        braking_speed_mps,
-    )
-
-    # 서버의 속도 제어 로직이 km/h 기준이므로 다시 km/h로 변환한다.
-    return target_speed_mps * 3.6
-
-
-# ============================================================
-# 8. 차체 방향 / 각도 계산
-# ============================================================
-
-def normalize_angle_deg(angle):
-    """
-    임의의 각도를 -180~+180 deg로 변환한다.
-
-    예:
-        350 deg -> -10 deg
-        190 deg -> -170 deg
-
-    이렇게 해야 왼쪽/오른쪽 중 어느 방향으로 얼마나 돌아야 하는지
-    가장 짧은 회전각을 계산할 수 있다.
-    """
-
-    return (
-        float(angle) + 180.0
-    ) % 360.0 - 180.0
-
-
-def read_player_body_yaw_deg(info):
-    """
-    서버 전역변수 latest_info에 직접 의존하지 않도록
-    /info JSON을 인자로 받아 차체 yaw를 추출한다.
-
-    반환값:
-        0~360 deg
-    """
-
-    # 현재 시뮬레이터에서 주로 사용하는 key.
-    value = info.get("playerBodyX")
-
-    # 대소문자가 다른 버전에도 대응한다.
-    if value is None:
-        value = info.get("PlayerBodyX")
-
-    # 둘 다 없으면 yaw를 계산할 수 없다.
-    if value is None:
-        return None
-
-    try:
-        # 360으로 나눈 나머지를 사용해 0~360 범위로 정규화한다.
-        return float(value) % 360.0
-
-    # 숫자로 변환할 수 없는 값이면 사용할 수 없다고 판단한다.
-    except (TypeError, ValueError):
-        return None
-
-
-# ============================================================
-# 9. D* Lite 경로에서 Look-ahead point 선택
-# ============================================================
-
-def select_lookahead_point(
-    path,
-    current_position,
-    lookahead_distance,
-):
-    """
-    현재 위치에서 가장 가까운 D* Lite path point를 찾고,
-    그 지점부터 경로를 따라 lookahead_distance만큼 앞의 점을 반환한다.
-
-    반환:
-        target_point, target_index
-    """
-
-    # 경로가 없으면 목표점도 선택할 수 없다.
-    if not path:
-        return None, None
-
-    # 현재 위치를 실수형 x, z로 분리한다.
-    cx, cz = map(
-        float,
-        current_position,
-    )
-
-    # 경로 전체 point 중 현재 위치와 유클리드 거리가 가장 가까운 index를 찾는다.
-    nearest_index = min(
-        range(len(path)),
-        key=lambda i: math.hypot(
-            float(path[i][0]) - cx,
-            float(path[i][1]) - cz,
-        ),
-    )
-
-    # 아직 앞으로 이동하지 않았으므로 target은 nearest point에서 시작한다.
-    target_index = nearest_index
-
-    # nearest_index 이후 경로 길이를 누적하기 위한 변수.
-    accumulated = 0.0
-
-    # 현재 가장 가까운 경로점부터 path 끝까지 앞쪽으로 탐색한다.
-    for i in range(
-        nearest_index,
-        len(path) - 1,
-    ):
-        # 현재 path point.
-        x1, z1 = map(
-            float,
-            path[i],
-        )
-
-        # 바로 다음 path point.
-        x2, z2 = map(
-            float,
-            path[i + 1],
-        )
-
-        # 두 점 사이 실제 길이를 누적한다.
-        accumulated += math.hypot(
-            x2 - x1,
-            z2 - z1,
-        )
-
-        # 현재까지 도달한 가장 앞쪽 index.
-        target_index = i + 1
-
-        # 누적 경로 길이가 목표 Look-ahead 거리 이상이면 탐색 종료.
-        if accumulated >= lookahead_distance:
-            break
-
-    # 선택한 path point와 index를 함께 반환한다.
-    return (
-        path[target_index],
-        target_index,
-    )
-
-
-def _path_distance_between(
-    path,
-    start_index,
-    end_index,
-):
-    """
-    path의 start_index부터 end_index까지 실제 경로 길이를 계산한다.
-
-    함수명 앞의 '_'는 외부 공개 API보다는
-    모듈 내부 보조 함수라는 의미로 사용한 것이다.
-    """
-
-    # 경로가 없거나 구간이 역방향/0길이면 거리 0.
-    if (
-        not path
-        or end_index <= start_index
-    ):
-        return 0.0
-
-    # 누적 경로 거리.
-    total = 0.0
-
-    # end_index가 path 범위를 넘어가는 것을 방지한다.
-    end_index = min(
-        end_index,
-        len(path) - 1,
-    )
-
-    # start -> end 사이의 각 path segment를 순회한다.
-    for i in range(
-        start_index,
-        end_index,
-    ):
-        x1, z1 = map(
-            float,
-            path[i],
-        )
-
-        x2, z2 = map(
-            float,
-            path[i + 1],
-        )
-
-        # 각 segment 길이를 누적한다.
-        total += math.hypot(
-            x2 - x1,
-            z2 - z1,
-        )
-
-    return total
-
-
-# ============================================================
-# 10. 앞으로 다가올 코너 탐색
-# ============================================================
-
-def find_upcoming_corner(
-    path,
-    current_position,
-    preview_distance=CORNER_PREVIEW_DISTANCE_M,
-    corner_angle_threshold=CORNER_ANGLE_THRESHOLD_DEG,
-    direction_sample_distance=CORNER_DIRECTION_SAMPLE_M,
-):
-    """
-    현재 위치 앞쪽 preview_distance 범위에서
-    첫 번째 의미 있는 코너를 찾는다.
-
-    반환 예:
-        {
-            "distance": 20.5,
-            "angle": 78.0,
-            "index": 120,
-            "point": (100, 150),
-        }
-    """
-
-    # 코너를 정의하려면 최소 3개 이상의 path point가 필요하다.
-    if (
-        path is None
-        or len(path) < 3
-    ):
-        return None
-
-    # 현재 위치.
-    px, pz = map(
-        float,
-        current_position,
-    )
-
-    # 현재 전차 위치에 가장 가까운 path index를 구한다.
-    nearest_index = min(
-        range(len(path)),
-        key=lambda i: math.hypot(
-            float(path[i][0]) - px,
-            float(path[i][1]) - pz,
-        ),
-    )
-
-    # 전차가 정확히 path point 위에 있지 않을 수 있으므로
-    # 현재 위치 -> 가장 가까운 path point 거리도 코너거리 계산에 포함한다.
-    current_to_nearest = math.hypot(
-        float(path[nearest_index][0]) - px,
-        float(path[nearest_index][1]) - pz,
-    )
-
-    # 현재 위치 다음부터 path 끝 직전까지 각 점을 코너 후보로 검사한다.
-    for candidate_index in range(
-        nearest_index + 1,
-        len(path) - 1,
-    ):
-        # 현재 전차 위치에서 후보 코너까지 path를 따라간 실제 거리.
-        distance_to_corner = (
-            current_to_nearest
-            + _path_distance_between(
-                path,
-                nearest_index,
-                candidate_index,
-            )
-        )
-
-        # preview 범위를 넘어갔다면 더 먼 점은 볼 필요가 없으므로 종료한다.
-        if distance_to_corner > preview_distance:
-            break
-
-        # 후보점 기준 뒤쪽 방향을 잡기 위한 index.
-        back_index = candidate_index
-
-        # 후보점에서 뒤로 얼마나 이동했는지 누적거리.
-        accumulated = 0.0
-
-        # 후보점에서 뒤쪽으로 direction_sample_distance만큼 이동한다.
-        while back_index > nearest_index:
-            x1, z1 = map(
-                float,
-                path[back_index],
-            )
-            x0, z0 = map(
-                float,
-                path[back_index - 1],
-            )
-
-            accumulated += math.hypot(
-                x1 - x0,
-                z1 - z0,
-            )
-
-            back_index -= 1
-
-            if accumulated >= direction_sample_distance:
-                break
-
-        # 후보점 기준 앞쪽 방향을 잡기 위한 index.
-        front_index = candidate_index
-
-        # 앞쪽 누적거리 초기화.
-        accumulated = 0.0
-
-        # 후보점에서 앞쪽으로 direction_sample_distance만큼 이동한다.
-        while front_index < len(path) - 1:
-            x0, z0 = map(
-                float,
-                path[front_index],
-            )
-            x1, z1 = map(
-                float,
-                path[front_index + 1],
-            )
-
-            accumulated += math.hypot(
-                x1 - x0,
-                z1 - z0,
-            )
-
-            front_index += 1
-
-            if accumulated >= direction_sample_distance:
-                break
-
-        # 앞/뒤 샘플이 실제로 후보점에서 떨어지지 않았다면
-        # 방향 비교가 불가능하므로 해당 후보를 건너뛴다.
         if (
-            back_index == candidate_index
-            or front_index == candidate_index
+            measured_speed_kmh is None
+            and self.info_previous_position is not None
+            and self.info_previous_time is not None
         ):
-            continue
+            dt = now - self.info_previous_time
 
-        # 뒤쪽 샘플 point.
-        bx, bz = map(
-            float,
-            path[back_index],
+            if 0.01 <= dt <= 1.0:
+                dx = (
+                    float(player_position[0])
+                    - float(self.info_previous_position[0])
+                )
+
+                dz = (
+                    float(player_position[1])
+                    - float(self.info_previous_position[1])
+                )
+
+                measured_speed_kmh = (
+                    math.hypot(dx, dz)
+                    / dt
+                    * 3.6
+                )
+
+                speed_source = "playerPos/dt"
+
+        self.info_previous_position = [
+            float(player_position[0]),
+            float(player_position[1]),
+        ]
+
+        self.info_previous_time = now
+
+        if measured_speed_kmh is not None:
+            if self.info_speed_kmh is None:
+                self.info_speed_kmh = measured_speed_kmh
+
+            else:
+                self.info_speed_kmh = (
+                    self.INFO_SPEED_EMA_ALPHA
+                    * measured_speed_kmh
+                    + (
+                        1.0
+                        - self.INFO_SPEED_EMA_ALPHA
+                    )
+                    * self.info_speed_kmh
+                )
+
+        return self.info_speed_kmh, speed_source
+
+    def _read_player_body_yaw_deg(self) -> Optional[float]:
+        """
+        최신 /info의 playerBodyX를 차체 yaw [deg]로 읽는다.
+
+        Returns:
+            0 ~ 360 deg yaw.
+            값이 없거나 숫자로 변환할 수 없으면 None.
+        """
+        value = self.latest_info.get("playerBodyX")
+
+        if value is None:
+            value = self.latest_info.get("PlayerBodyX")
+
+        if value is None:
+            return None
+
+        try:
+            return float(value) % 360.0
+        except (TypeError, ValueError):
+            return None
+
+    def _update_fire_body_rate(
+        self,
+        body_yaw_deg: Optional[float],
+    ) -> float:
+        """
+        연속된 /info의 차체 yaw 변화량으로 실제 차체 각속도를 계산한다.
+
+        Args:
+            body_yaw_deg:
+                현재 /info의 playerBodyX [deg].
+
+        Returns:
+            현재 차체 yaw rate [deg/s].
+
+        계산식:
+            body_rate_dps = normalize_angle(current_yaw - previous_yaw) / dt
+
+        역할:
+            PID 조향 weight에 임의의 선회율 상수를 곱하지 않고,
+            시뮬레이터에서 실제로 변한 playerBodyX를 사용해
+            사격팀의 차체 회전 보정값을 만든다.
+        """
+        # 현재 /info 수신 시각 [sec, monotonic].
+        now = time.monotonic()
+
+        # yaw 데이터가 없으면 실제 각속도를 계산할 수 없으므로 0으로 둔다.
+        if body_yaw_deg is None:
+            self.fire_previous_body_yaw_deg = None
+            self.fire_previous_body_yaw_time = None
+            self.fire_body_rate_dps = 0.0
+            return self.fire_body_rate_dps
+
+        # 첫 번째 yaw 샘플은 이전 값이 없으므로 기준값만 저장한다.
+        if (
+            self.fire_previous_body_yaw_deg is None
+            or self.fire_previous_body_yaw_time is None
+        ):
+            self.fire_previous_body_yaw_deg = float(body_yaw_deg)
+            self.fire_previous_body_yaw_time = now
+            self.fire_body_rate_dps = 0.0
+            return self.fire_body_rate_dps
+
+        # 직전 /info와 현재 /info 사이의 실제 시간 차 [sec].
+        dt = (
+            now
+            - self.fire_previous_body_yaw_time
         )
 
-        # 코너 후보 point.
-        cx, cz = map(
-            float,
-            path[candidate_index],
+        # 359 -> 0 deg처럼 360 deg 경계를 넘어도
+        # 실제 최단 회전량을 얻도록 -180~+180 deg로 정규화한다.
+        yaw_delta_deg = normalize_angle_deg(
+            float(body_yaw_deg)
+            - self.fire_previous_body_yaw_deg
         )
 
-        # 앞쪽 샘플 point.
-        fx, fz = map(
-            float,
-            path[front_index],
-        )
-
-        # 코너 진입 전 방향.
-        # +Z = 0도, +X = +90도 기준.
-        heading_before = math.degrees(
-            math.atan2(
-                cx - bx,
-                cz - bz,
+        # 정상적인 /info 시간 간격에서만 각속도를 계산한다.
+        if 0.01 <= dt <= 1.0:
+            self.fire_body_rate_dps = (
+                yaw_delta_deg
+                / dt
             )
+        else:
+            self.fire_body_rate_dps = 0.0
+
+        # 다음 /info 계산을 위한 현재 yaw/시간 저장.
+        self.fire_previous_body_yaw_deg = float(body_yaw_deg)
+        self.fire_previous_body_yaw_time = now
+
+        return self.fire_body_rate_dps
+
+    def get_fire_control_inputs(
+        self,
+        drive_command: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        FireModule.get_turret_command()에 필요한 주행팀 입력을 반환한다.
+
+        기존 PID 주행 제어식과 Jupyter Notebook의 비례식은 변경하지 않는다.
+        PID Controller가 이미 /info에서 관리하는 실제 속도와 yaw,
+        실제 yaw 변화량으로 계산한 차체 각속도만 사격팀에 제공한다.
+
+        Args:
+            drive_command:
+                이번 /get_action에서 계산한 주행 명령 dictionary.
+                현재 계산에서는 별도 선회율 상수나 moveAD 비례식을 만들지 않는다.
+
+        Returns:
+            my_vel:
+                현재 차량 월드 좌표계 속도 벡터 [m/s].
+
+            body_rate_dps:
+                실제 playerBodyX 변화량 / dt로 계산한 차체 각속도 [deg/s].
+
+            hull_settled:
+                현재 차량이 거의 정지하고 차체 회전도 거의 없는지 여부.
+        """
+        # PID 속도 제어에 실제로 사용 중인 필터링 속력 [km/h].
+        speed_kmh = (
+            float(self.info_speed_kmh)
+            if self.info_speed_kmh is not None
+            else 0.0
         )
 
-        # 코너 통과 후 방향.
-        heading_after = math.degrees(
-            math.atan2(
-                fx - cx,
-                fz - cz,
-            )
+        # FireModule 입력 단위인 m/s로 변환한 현재 속력.
+        speed_mps = (
+            speed_kmh
+            / 3.6
         )
 
-        # 두 방향 차이를 -180~180 범위로 정규화한 뒤 절댓값을 취해
-        # 실제 코너의 꺾임 각도 크기를 얻는다.
-        turn_angle = abs(
-            normalize_angle_deg(
-                heading_after
-                - heading_before
-            )
+        # PID 조향 제어에 실제로 사용 중인 차체 yaw [deg].
+        body_yaw_deg = (
+            self._read_player_body_yaw_deg()
         )
 
-        # 설정한 threshold 이상의 꺾임이면 의미 있는 코너로 판정한다.
-        if turn_angle >= corner_angle_threshold:
-            return {
-                # 현재 위치에서 코너까지 path를 따라간 거리.
-                "distance": distance_to_corner,
+        # 아직 yaw가 들어오지 않았으면 속도벡터 방향 계산에서만 0 deg를 사용한다.
+        velocity_yaw_deg = (
+            float(body_yaw_deg)
+            if body_yaw_deg is not None
+            else 0.0
+        )
 
-                # 코너 꺾임 각도.
-                "angle": turn_angle,
+        # 속도 벡터 계산을 위한 yaw [rad].
+        velocity_yaw_rad = math.radians(
+            velocity_yaw_deg
+        )
 
-                # path 배열 안의 코너 index.
-                "index": candidate_index,
+        # Unity 기준 yaw 0 deg = +Z이므로 X축 속도는 sin(yaw)를 사용한다.
+        velocity_x_mps = (
+            speed_mps
+            * math.sin(velocity_yaw_rad)
+        )
 
-                # 코너 world/grid 좌표.
-                "point": (cx, cz),
-            }
+        # Unity 기준 yaw 0 deg = +Z이므로 Z축 속도는 cos(yaw)를 사용한다.
+        velocity_z_mps = (
+            speed_mps
+            * math.cos(velocity_yaw_rad)
+        )
 
-    # preview 범위 안에서 코너를 찾지 못함.
-    return None
-
-
-# ============================================================
-# 11. 출발/방향 정렬 시 전진 가속 제한
-# ============================================================
-
-def apply_alignment_speed_limit(
-    command,
-    heading_error_deg,
-    current_speed_kmh,
-):
-    """
-    차체가 경로 방향과 크게 어긋난 상태에서
-    W=1.0으로 바로 가속하여 벽에 충돌하는 것을 막는다.
-
-    주의:
-    이 함수는 코너 자체의 목표속도를 계산하는 함수가 아니라,
-    차체 정렬 상태가 좋지 않을 때 W 출력을 보조적으로 제한하는 함수다.
-    """
-
-    # command 자체가 없으면 그대로 반환.
-    if not command:
-        return command
-
-    # command 안의 전/후진 명령 부분을 읽는다.
-    ws = command.get(
-        "moveWS",
-        {},
-    )
-
-    # W 전진 명령이 아니면 S 제동 등을 수정하지 않는다.
-    if ws.get("command") != "W":
-        return command
-
-    # 현재 목표 방향과 차체 방향의 절대 오차 [deg].
-    angle = abs(
-        float(heading_error_deg)
-    )
-
-    # 현재 속도 [km/h].
-    speed = float(
-        current_speed_kmh
-    )
-
-    # PID가 원래 요청한 W weight.
-    original_weight = float(
-        ws.get(
-            "weight",
+        # FireModule에 넘길 자기 차량의 월드 속도 벡터 [m/s].
+        my_vel = (
+            velocity_x_mps,
             0.0,
-        )
-    )
-
-    # 50도 이상 크게 틀어져 있으면 전진을 끄고 조향을 우선한다.
-    if angle >= 50.0:
-        command["moveWS"] = {
-            "command": "",
-            "weight": 0.0,
-        }
-        return command
-
-    # 30~50도면 최대 W=0.20으로 제한한다.
-    if angle >= 30.0:
-        command["moveWS"] = {
-            "command": "W",
-            "weight": min(
-                original_weight,
-                0.20,
-            ),
-        }
-        return command
-
-    # 15~30도면 최대 W=0.45로 제한한다.
-    if angle >= 15.0:
-        command["moveWS"] = {
-            "command": "W",
-            "weight": min(
-                original_weight,
-                0.45,
-            ),
-        }
-        return command
-
-    # 7~15도는 저속일 때만 W를 0.70 이하로 제한한다.
-    # 이미 20km/h 이상 움직이고 있다면 heading error만으로
-    # 계속 가속을 막지 않도록 한다.
-    if (
-        angle >= 7.0
-        and speed < 20.0
-    ):
-        command["moveWS"] = {
-            "command": "W",
-            "weight": min(
-                original_weight,
-                0.70,
-            ),
-        }
-        return command
-
-    # 7도 미만이면 PID가 만든 W 출력을 그대로 사용한다.
-    return command
-
-
-# ============================================================
-# 12. 코너 종류/거리별 목표속도 제한
-# ============================================================
-
-def calculate_corner_speed_limit(
-    corner,
-    normal_speed_kmh=MAX_SPEED_KMH,
-):
-    """
-    find_upcoming_corner()가 찾은 코너의 각도와 거리로
-    현재 허용할 목표속도를 결정한다.
-
-    현재 버전은 연속식이 아니라
-    Sharp/Medium/Gentle + Near/Mid/Far 규칙 기반 방식이다.
-    """
-
-    # 앞쪽에 코너가 없으면 일반 최고속도를 허용한다.
-    if corner is None:
-        return float(
-            normal_speed_kmh
+            velocity_z_mps,
         )
 
-    # 현재 위치에서 코너까지 거리.
-    distance = float(
-        corner["distance"]
-    )
-
-    # 코너의 방향 변화각.
-    angle = float(
-        corner["angle"]
-    )
-
-    # 70도 이상 Sharp 코너.
-    if angle >= SHARP_CORNER_ANGLE_DEG:
-
-        # 8m 이내면 가장 강한 속도 제한.
-        if distance <= CORNER_NEAR_DISTANCE_M:
-            return SHARP_CORNER_SPEED_NEAR_KMH
-
-        # 18m 이내면 중간 수준 제한.
-        if distance <= CORNER_MID_DISTANCE_M:
-            return SHARP_CORNER_SPEED_MID_KMH
-
-        # 35m 이내면 선행 감속.
-        if distance <= CORNER_FAR_DISTANCE_M:
-            return SHARP_CORNER_SPEED_FAR_KMH
-
-    # 40~70도 Medium 코너.
-    elif angle >= MEDIUM_CORNER_ANGLE_DEG:
-
-        if distance <= CORNER_NEAR_DISTANCE_M:
-            return MEDIUM_CORNER_SPEED_NEAR_KMH
-
-        if distance <= CORNER_MID_DISTANCE_M:
-            return MEDIUM_CORNER_SPEED_MID_KMH
-
-        if distance <= CORNER_FAR_DISTANCE_M:
-            return MEDIUM_CORNER_SPEED_FAR_KMH
-
-    # 20~40도 Gentle 코너.
-    elif angle >= CORNER_ANGLE_THRESHOLD_DEG:
-
-        # 완만한 코너는 현재 코드에서 5m 이내일 때만 제한한다.
-        if distance <= 5.0:
-            return GENTLE_CORNER_SPEED_NEAR_KMH
-
-    # 위 조건에 해당하지 않으면 일반 목표속도를 그대로 사용한다.
-    return float(
-        normal_speed_kmh
-    )
-
-
-# ============================================================
-# 13. D* Lite 경로 추종 조향 명령 생성
-# ============================================================
-
-def calculate_steering_command(
-    current_position,
-    body_yaw_deg,
-    path,
-    current_speed_kmh,
-    dt,
-):
-    """
-    현재 위치와 D* Lite path를 받아
-    Look-ahead point를 향하도록 A/D 조향 명령을 계산한다.
-
-    반환:
-        steering_command, steering_info
-    """
-
-    # 속도가 높을수록 경로를 조금 더 멀리 바라본다.
-    # clamp로 최소/최대 Look-ahead를 보장한다.
-    lookahead_distance = clamp(
-        LOOKAHEAD_BASE_M
-        + LOOKAHEAD_SPEED_GAIN
-        * current_speed_kmh,
-        LOOKAHEAD_MIN_M,
-        LOOKAHEAD_MAX_M,
-    )
-
-    # 실제 D* Lite 경로 상에서 lookahead_distance만큼 앞쪽 point를 선택한다.
-    target_point, target_index = (
-        select_lookahead_point(
-            path,
-            current_position,
-            lookahead_distance,
+        # /info의 실제 yaw 변화로 계산해 둔 차체 각속도 [deg/s].
+        body_rate_dps = float(
+            self.fire_body_rate_dps
         )
-    )
 
-    # 경로가 없어 target을 선택할 수 없으면 조향 입력을 해제한다.
-    if target_point is None:
-
-        # 이전 조향 오차가 다음 경로에 영향을 주지 않도록 PID 상태 초기화.
-        steering_pid.reset()
+        # 기존 FireModule 연동에서 사용하던 정지 판정 기준을 유지한다.
+        hull_settled = (
+            speed_mps < 0.3
+            and abs(body_rate_dps) < 1e-6
+        )
 
         return {
-            "command": "",
-            "weight": 0.0,
-        }, None
+            "my_vel": my_vel,
+            "body_rate_dps": body_rate_dps,
+            "hull_settled": hull_settled,
+        }
 
-    # 현재 위치.
-    cx, cz = map(
-        float,
-        current_position,
-    )
 
-    # 목표 Look-ahead point.
-    tx, tz = map(
-        float,
-        target_point,
-    )
+    def handle_info(
+        self,
+        data: Optional[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        Flask /info endpoint의 전체 주행 상태 처리를 담당한다.
 
-    # 목표점까지 X 방향 차이.
-    dx = tx - cx
+        Args:
+            data:
+                request.get_json(force=True) 결과.
 
-    # 목표점까지 Z 방향 차이.
-    dz = tz - cz
+        Returns:
+            (response dictionary, HTTP status code)
+        """
+        data = data or {}
 
-    # 목표점을 바라보기 위한 절대 heading.
-    # atan2(dx, dz)를 사용하여 +Z=0°, +X=+90° 기준으로 계산한다.
-    target_heading_deg = (
-        math.degrees(
-            math.atan2(
-                dx,
-                dz,
+        if not data:
+            return {"error": "No JSON received"}, 400
+
+        self.latest_info = data
+
+        # 이번 /info에서 받은 실제 차체 yaw [deg].
+        body_yaw_deg = (
+            self._read_player_body_yaw_deg()
+        )
+
+        # 연속 /info의 yaw 변화량으로 사격팀 보정용
+        # 실제 차체 각속도 [deg/s]를 갱신한다.
+        self._update_fire_body_rate(
+            body_yaw_deg
+        )
+
+        player_pos = data.get("playerPos", {})
+
+        if player_pos:
+            fallback_x = (
+                self.current_pos[0]
+                if self.current_pos is not None
+                else 0.0
+            )
+
+            fallback_z = (
+                self.current_pos[1]
+                if self.current_pos is not None
+                else 0.0
+            )
+
+            self.current_pos = [
+                float(player_pos.get("x", fallback_x)),
+                float(player_pos.get("z", fallback_z)),
+            ]
+
+        # playerPos가 없는 경우에는 기존 current_pos가 있을 때만 속도 상태를 갱신한다.
+        if self.current_pos is not None:
+            speed_kmh, speed_source = self._update_info_speed(
+                data,
+                self.current_pos,
+            )
+        else:
+            speed_kmh = self.info_speed_kmh
+            speed_source = None
+
+        print("[/info] 현재 위치:", self.current_pos)
+        print("[/info] 차체 방향:", data.get("playerBodyX"))
+        print(
+            "[/info] 현재 속도:",
+            "계산 대기"
+            if speed_kmh is None
+            else f"{speed_kmh:.2f} km/h",
+            f"(source={speed_source})",
+        )
+        print("[/info] 설정 목적지:", self.dest)
+
+        return {
+            "status": "success",
+            "control": "",
+        }, 200
+
+    # --------------------------------------------------------
+    # 목적지 / 초기화
+    # --------------------------------------------------------
+
+    def initialize(
+        self,
+        start_position: Sequence[float],
+        destination: Optional[Sequence[float]] = None,
+    ) -> None:
+        """
+        새 episode 시작 시 제어 상태를 초기화한다.
+
+        Args:
+            start_position:
+                시작 X-Z 좌표 [m].
+            destination:
+                선택적 초기 목적지.
+                (x, z) 또는 (x, y, z)를 받을 수 있다.
+        """
+        if len(start_position) < 2:
+            raise ValueError(
+                "start_position must contain x and z"
+            )
+
+        self.current_pos = [
+            float(start_position[0]),
+            float(start_position[-1]),
+        ]
+
+        self.current_path = []
+
+        self._reset_control_state(
+            reset_destination_signature=True,
+        )
+
+        self._reset_info_state()
+
+        # _reset_info_state가 current_pos를 지우지 않으므로 시작 위치는 그대로 유지된다.
+        if destination is not None:
+            if len(destination) >= 3:
+                x = float(destination[0])
+                y = float(destination[1])
+                z = float(destination[2])
+            elif len(destination) == 2:
+                x = float(destination[0])
+                y = 0.0
+                z = float(destination[1])
+            else:
+                raise ValueError(
+                    "destination must contain (x,z) or (x,y,z)"
+                )
+
+            self.apply_destination(
+                x,
+                y,
+                z,
+            )
+
+    def apply_destination(
+        self,
+        x: float,
+        y: float,
+        z: float,
+    ) -> Dict[str, Any]:
+        """
+        /set_destination과 /init이 공통으로 사용하는 목적지 설정 함수.
+
+        Args:
+            x:
+                목적지 X 좌표 [m].
+            y:
+                목적지 Y 좌표 [m]. D* Lite 평면 경로에는 사용하지 않지만 응답 형식을 유지한다.
+            z:
+                목적지 Z 좌표 [m].
+
+        Returns:
+            목적지, 경로 길이/비용, map URL 정보를 포함하는 response dictionary.
+        """
+        if self.current_pos is None:
+            raise ValueError(
+                "Current position is not received yet"
+            )
+
+        self.dest = [
+            float(x),
+            float(z),
+        ]
+
+        self._reset_control_state(
+            reset_destination_signature=True,
+        )
+
+        print(
+            "[DEST RESET]",
+            f"dest={self.dest}",
+            f"arrival_latched={self.arrival_latched}",
+            f"last_pid_destination={self.last_pid_destination}",
+        )
+
+        self.clear_start_area(
+            self.current_pos,
+            radius=2,
+        )
+
+        with self.planner_lock:
+            self.current_path = self.planner.find_path(
+                self.current_pos,
+                self.dest,
+                self.latest_info
+            )
+
+        self.render_map(
+            "D* Lite Demo (300X300)"
+        )
+
+        print(
+            f"🎯 Destination set to: "
+            f"x={x}, y={y}, z={z}"
+        )
+
+        return {
+            "status": "OK",
+            "destination": {
+                "x": float(x),
+                "y": float(y),
+                "z": float(z),
+            },
+            "path_done_count": len(self.current_path),
+            "path_cost": self.planner.get_path_cost(
+                self.current_path
+            ),
+            "map_url": "/path_map",
+        }
+
+    def handle_set_destination(
+        self,
+        data: Optional[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        Flask /set_destination endpoint의 입력검사와 목적지 적용을 담당한다.
+
+        Args:
+            data:
+                request.get_json() 결과.
+
+        Returns:
+            (response dictionary, HTTP status code)
+        """
+        self.stop_flag = True
+        self.current_path = []
+
+        data = data or {}
+
+        if "destination" not in data:
+            return {
+                "status": "ERROR",
+                "message": "Missing destination data",
+            }, 400
+
+        try:
+            x, y, z = map(
+                float,
+                data["destination"].split(","),
+            )
+        except Exception as exc:
+            # 좌표 파싱 자체가 실패한 경우(콤마 개수, 숫자 변환 등)만
+            # "Invalid format"으로 분류한다.
+            return {
+                "status": "ERROR",
+                "message": f"Invalid format: {str(exc)}",
+            }, 400
+
+        try:
+            return self.apply_destination(
+                x,
+                y,
+                z,
+            ), 200
+
+        except ValueError as exc:
+            # apply_destination() -> find_path()가 던지는 ValueError는
+            # 좌표 형식 문제가 아니라 "시작점/목적지가 장애물(패딩 포함)에
+            # 막혀서 경로를 못 만든다"는 뜻이다(혹은 아직 /info를 못 받아
+            # current_pos가 없는 경우). 원인을 구분해서 응답하고 서버
+            # 콘솔에도 그대로 남겨서 디버깅이 가능하게 한다.
+            print(f"[/set_destination] 경로 계산 실패: {exc}")
+            return {
+                "status": "ERROR",
+                "message": f"Path planning failed: {str(exc)}",
+            }, 400
+
+        except Exception as exc:
+            # 그 외 예상 못한 예외는 원인을 감추지 않고 traceback까지 남긴다.
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "ERROR",
+                "message": f"Unexpected error: {str(exc)}",
+            }, 500
+
+    # --------------------------------------------------------
+    # D* Lite obstacle / map 관리
+    # --------------------------------------------------------
+
+    def clear_start_area(
+        self,
+        position: Optional[Sequence[float]],
+        radius: int = 2,
+    ) -> None:
+        """
+        시작점 주변 hard obstacle을 예외적으로 해제한다.
+
+        현재 복구된 서버와 동일하게 기본 radius=2를 유지한다.
+
+        Args:
+            position:
+                현재 차량 X-Z 위치 [m].
+            radius:
+                시작점 주변에서 obstacle을 해제할 grid 반경 [cell].
+        """
+        if position is None:
+            return
+
+        with self.planner_lock:
+            center = self.planner.world_to_grid(
+                position,
+                clamp=True,
+            )
+
+            changed = set()
+
+            for dx in range(-radius, radius + 1):
+                for dz in range(-radius, radius + 1):
+                    cell = (
+                        center[0] + dx,
+                        center[1] + dz,
+                    )
+
+                    if (
+                        self.planner.in_bounds(cell)
+                        and cell in self.planner.obstacles
+                    ):
+                        self.planner.obstacles.discard(cell)
+                        changed.add(cell)
+
+            if changed:
+                self.planner.refresh_costmap()
+
+    def _update_obstacles_from_payload(
+        self,
+        payload: Dict[str, Any],
+    ):
+        """
+        /update_obstacle payload를 ObstacleRect 목록으로 변환해 planner에 반영한다.
+
+        Args:
+            payload:
+                obstacles 배열을 포함하는 JSON dictionary.
+
+        Returns:
+            DStarLitePlanner.set_obstacles()가 반환한 changed_cells.
+        """
+        obs_list = []
+
+        for item in payload.get(
+            "obstacles",
+            [],
+        ):
+            obs = ObstacleRect.from_min_max(
+                x_min=item["x_min"],
+                x_max=item["x_max"],
+                z_min=item["z_min"],
+                z_max=item["z_max"],
+            )
+
+            obs_list.append(obs)
+
+        with self.planner_lock:
+            changed_cells = self.planner.set_obstacles(
+                obs_list
+            )
+
+        self.clear_start_area(
+            self.current_pos,
+            radius=2,
+        )
+
+        print(
+            "변경된 장애물 Grid 수:",
+            len(changed_cells),
+        )
+        print(
+            "등록된 장애물 사각형 수:",
+            len(self.planner.obstacle_rectangles),
+        )
+        print(
+            "Clearance cost 설정:",
+            f"hard_margin={self.planner.obstacle_margin},",
+            f"radius={self.planner.clearance_radius},",
+            f"weight={self.planner.clearance_weight},",
+            f"decay={self.planner.clearance_decay}",
+        )
+        print(
+            "Soft cost 적용 셀 수:",
+            len(self.planner.clearance_costs),
+        )
+
+        return changed_cells
+
+    def handle_update_obstacles(
+        self,
+        data: Optional[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        Flask /update_obstacle endpoint의 obstacle 갱신과 재계획을 담당한다.
+
+        Args:
+            data:
+                request.get_json() 결과.
+
+        Returns:
+            (response dictionary, HTTP status code)
+        """
+        if not data:
+            return {
+                "status": "error",
+                "message": "No data received",
+            }, 400
+
+        print(
+            "🪨 Obstacle Data:",
+            data,
+        )
+
+        changed_cells = self._update_obstacles_from_payload(
+            data
+        )
+
+        if (
+            self.current_pos is not None
+            and self.dest is not None
+        ):
+            try:
+                with self.planner_lock:
+                    self.current_path = self.planner.find_path(
+                        self.current_pos,
+                        self.dest,
+                        self.latest_info
+                    )
+
+            except ValueError as exc:
+                print(
+                    "D* Lite 재계획 실패:",
+                    exc,
+                )
+                self.current_path = []
+
+            self.render_map(
+                "D* Lite Replanning"
+            )
+
+        else:
+            self.current_path = []
+
+            self.render_map(
+                "D* Lite Obstacle Map"
+            )
+
+        return {
+            "status": "success",
+            "message": "Obstacle data received",
+            "changed_cell_count": len(changed_cells),
+            "path_length": len(self.current_path),
+            "obstacle_count": len(
+                self.planner.obstacle_rectangles
+            ),
+            "map_url": "/path_map",
+        }, 200
+
+    def render_map(
+        self,
+        title: str,
+    ) -> str:
+        """
+        현재 D* Lite obstacle/path 상태를 PNG로 저장한다.
+
+        주의:
+            planner.plot()(동기/blocking)이 아니라 plot_async()를 쓴다.
+            plot()은 matplotlib legend(loc='best')가 obstacle_rectangles
+            수백 개 + 90000픽셀 imshow를 상대로 '겹치지 않는 위치'를
+            전수 탐색하느라 실제로 수십 초~분 단위로 걸릴 수 있는데,
+            이 함수가 apply_destination()/handle_update_obstacles() 안에서
+            request 처리 스레드를 그대로 막고 있어서(게다가
+            planner_lock까지 잡은 채로) 목적지 설정/장애물 갱신 응답
+            자체가 오래 걸리는 원인이었다. plot_async()는 그리는 데
+            필요한 데이터만 스냅샷 떠서 별도 데몬 스레드에 넘기고
+            즉시 리턴하므로 요청 스레드를 막지 않는다.
+
+        Args:
+            title:
+                plot 제목.
+
+        Returns:
+            저장될 예정인 map 이미지 파일 경로. plot_async()는 비동기라
+            이 시점에는 아직 파일이 안 만들어져 있을 수 있다.
+        """
+        with self.planner_lock:
+            self.planner.plot_async(
+                path=(
+                    self.current_path
+                    if self.current_path
+                    else None
+                ),
+                show_grid=True,
+                title=title,
+                save_path=self.map_image_path,
+            )
+
+        return self.map_image_path
+
+    def get_map_path(self) -> str:
+        """
+        /path_map endpoint에서 send_file에 넘길 map 이미지 경로를 반환한다.
+
+        render_map()은 이제 비동기라 파일이 아직 안 만들어졌을 수 있다.
+        여긴 사람이 브라우저로 이미지를 열어보는 디버그용 endpoint라
+        핫패스(주행 루프)와 달리 한 번쯤 느려도 괜찮으므로, 파일이 아예
+        없는 최초 1회에 한해 동기 plot()으로 확실히 만들어서 돌려준다.
+
+        Returns:
+            map PNG 경로.
+        """
+        if not Path(
+            self.map_image_path
+        ).exists():
+            with self.planner_lock:
+                self.planner.plot(
+                    path=(
+                        self.current_path
+                        if self.current_path
+                        else None
+                    ),
+                    show_grid=True,
+                    title="D* Lite Map",
+                    save_path=self.map_image_path,
+                    show=False,
+                )
+
+        return self.map_image_path
+
+    # --------------------------------------------------------
+    # 속도 / 코너 / 조향 계산
+    # --------------------------------------------------------
+
+    def _calculate_target_speed_kmh(
+        self,
+        usable_distance: float,
+    ) -> float:
+        """
+        남은 거리에서 계획 감속도로 정지 가능한 속도 상한을 계산한다.
+
+        v^2 = 2ad 를 사용한다.
+
+        Args:
+            usable_distance:
+                반응거리를 제외한 실제 감속 가능 거리 [m].
+
+        Returns:
+            목적지 접근 목표속도 상한 [km/h].
+        """
+        usable_distance = max(
+            0.0,
+            float(usable_distance),
+        )
+
+        braking_speed_mps = math.sqrt(
+            2.0
+            * self.PLANNED_BRAKE_DECEL_MPS2
+            * usable_distance
+        )
+
+        max_speed_mps = (
+            self.MAX_SPEED_KMH / 3.6
+        )
+
+        target_speed_mps = min(
+            max_speed_mps,
+            braking_speed_mps,
+        )
+
+        return target_speed_mps * 3.6
+
+    def _calculate_corner_speed_limit(
+        self,
+        corner: Optional[Dict[str, Any]],
+        current_speed_kmh: float,
+        dt: float,
+        normal_speed_kmh: Optional[float] = None,
+    ) -> float:
+        """
+        코너 각도와 남은 거리로 제한속도를 연속적으로 계산한다.
+
+        Args:
+            corner:
+                calculate_next_vertex_corner() 결과.
+            current_speed_kmh:
+                현재 차량 속도 [km/h].
+            dt:
+                현재 제어 주기 [sec].
+            normal_speed_kmh:
+                직선 기준 목표속도 [km/h].
+                None이면 MAX_SPEED_KMH를 사용한다.
+
+        Returns:
+            현재 코너에서 허용할 속도 상한 [km/h].
+        """
+        if normal_speed_kmh is None:
+            normal_speed_kmh = self.MAX_SPEED_KMH
+
+        if corner is None:
+            return float(
+                normal_speed_kmh
+            )
+
+        distance = max(
+            0.0,
+            float(corner["distance"]),
+        )
+
+        angle = max(
+            0.0,
+            float(corner["angle"]),
+        )
+
+        # 코너 각도 0~90 deg를 0~1 severity로 변환한다.
+        corner_severity = clamp(
+            angle / 90.0,
+            0.0,
+            1.0,
+        )
+
+        # 실제 차량 회전반경 모델이 아직 없으므로
+        # 현재 복구된 서버에서 사용하던 코너 최소 통과속도 [km/h]를 유지한다.
+        min_corner_speed_kmh = 8.0
+
+        corner_target_speed_kmh = (
+            normal_speed_kmh
+            - corner_severity
+            * (
+                normal_speed_kmh
+                - min_corner_speed_kmh
             )
         )
-        % 360.0
-    )
 
-    # 목표 heading - 현재 yaw.
-    # normalize하여 -180~180 범위의 가장 짧은 회전오차를 얻는다.
-    heading_error_deg = (
-        normalize_angle_deg(
-            target_heading_deg
-            - float(body_yaw_deg)
+        current_speed_mps = max(
+            0.0,
+            current_speed_kmh / 3.6,
         )
-    )
 
-    # 오차가 deadband 안에 있으면 직진으로 보고 조향하지 않는다.
-    if (
-        abs(heading_error_deg)
-        <= STEER_DEADBAND_DEG
-    ):
-        steering_pid.reset()
-        steer_output = 0.0
+        # 현재 속도와 제어주기만큼의 동적 반응거리 [m].
+        reaction_distance = (
+            current_speed_mps * dt
+        )
 
-    else:
-        # 방향 오차를 steering PID에 넣어 A/D weight를 계산한다.
+        usable_distance = max(
+            0.0,
+            distance - reaction_distance,
+        )
+
+        corner_target_speed_mps = (
+            corner_target_speed_kmh / 3.6
+        )
+
+        allowed_speed_mps = math.sqrt(
+            corner_target_speed_mps ** 2
+            + 2.0
+            * self.PLANNED_BRAKE_DECEL_MPS2
+            * usable_distance
+        )
+
+        allowed_speed_kmh = (
+            allowed_speed_mps * 3.6
+        )
+
+        return min(
+            float(normal_speed_kmh),
+            allowed_speed_kmh,
+        )
+
+    def _calculate_alignment_speed_limit(
+        self,
+        heading_error_deg: float,
+        normal_speed_kmh: Optional[float] = None,
+    ) -> float:
+        """
+        현재 차체와 조향 목표 방향의 오차로 속도 상한을 계산한다.
+
+        현재 복구된 서버 식을 그대로 유지한다.
+
+        Args:
+            heading_error_deg:
+                현재 차체와 조향 target heading 사이 오차 [deg].
+            normal_speed_kmh:
+                완전히 정렬됐을 때 최대 허용속도 [km/h].
+
+        Returns:
+            alignment 기반 목표속도 상한 [km/h].
+        """
+        if normal_speed_kmh is None:
+            normal_speed_kmh = self.MAX_SPEED_KMH
+
+        angle = abs(
+            float(heading_error_deg)
+        )
+
+        alignment_ratio = clamp(
+            1.0 - angle / 90.0,
+            0.0,
+            1.0,
+        )
+
+        speed_ratio = (
+            alignment_ratio
+            * alignment_ratio
+        )
+
+        return (
+            float(normal_speed_kmh)
+            * speed_ratio
+        )
+
+    def _calculate_steering_command(
+        self,
+        current_position: Sequence[float],
+        body_yaw_deg: float,
+        path: Sequence[Sequence[float]],
+        current_speed_kmh: float,
+        dt: float,
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """
+        D* Lite look-ahead target과 현재 yaw 오차로 moveAD 명령을 계산한다.
+
+        Args:
+            current_position:
+                현재 차량 X-Z 좌표 [m].
+            body_yaw_deg:
+                현재 차체 yaw [deg].
+            path:
+                현재 압축 D* Lite 경로.
+            current_speed_kmh:
+                현재 차량 속도 [km/h].
+            dt:
+                제어 주기 [sec].
+
+        Returns:
+            (steering_command, steering_info)
+        """
+        lookahead_distance = (
+            self.LOOKAHEAD_BASE_M
+            + self.LOOKAHEAD_SPEED_GAIN
+            * current_speed_kmh
+        )
+
+        target_point, target_index = (
+            select_lookahead_point(
+                path,
+                current_position,
+                lookahead_distance,
+            )
+        )
+
+        if target_point is None:
+            self.steering_pid.reset()
+
+            return {
+                "command": "",
+                "weight": 0.0,
+            }, None
+
+        cx, cz = map(
+            float,
+            current_position,
+        )
+
+        tx, tz = map(
+            float,
+            target_point,
+        )
+
+        dx = tx - cx
+        dz = tz - cz
+
+        # 현재 시뮬레이터 좌표계: +Z = 0deg, +X = +90deg.
+        target_heading_deg = (
+            math.degrees(
+                math.atan2(
+                    dx,
+                    dz,
+                )
+            )
+            % 360.0
+        )
+
+        heading_error_deg = (
+            normalize_angle_deg(
+                target_heading_deg
+                - body_yaw_deg
+            )
+        )
+
         steer_output = (
-            steering_pid.update(
+            self.steering_pid.update(
                 heading_error_deg,
                 dt,
             )
         )
 
-    # 양수 출력은 오른쪽 D.
-    if steer_output > 0.0:
-        ad_command = "D"
-
-        # 혹시 PID 출력이 최대값을 넘더라도 조향 상한을 다시 보장한다.
-        ad_weight = min(
-            abs(steer_output),
-            STEER_MAX_WEIGHT,
+        print(
+            "[STEER DEBUG]",
+            f"target_index={target_index}",
+            f"heading_error={heading_error_deg:.2f}",
+            f"steer_output={steer_output:.3f}",
+            f"speed={current_speed_kmh:.2f}",
         )
 
-    # 음수 출력은 왼쪽 A.
-    elif steer_output < 0.0:
-        ad_command = "A"
-
-        ad_weight = min(
-            abs(steer_output),
-            STEER_MAX_WEIGHT,
-        )
-
-    # 0이면 조향 없음.
-    else:
-        ad_command = ""
-        ad_weight = 0.0
-
-    # 서버 로그/디버깅에서 사용할 부가정보.
-    info = {
-        "target_point": (
-            tx,
-            tz,
-        ),
-        "target_index": target_index,
-        "lookahead_m": lookahead_distance,
-        "target_heading_deg": (
-            target_heading_deg
-        ),
-        "body_yaw_deg": (
-            float(body_yaw_deg)
-        ),
-        "heading_error_deg": (
-            heading_error_deg
-        ),
-        "steer_output": steer_output,
-    }
-
-    # 실제 서버 command 형식에 맞춘 A/D 명령과
-    # 디버깅 정보를 함께 반환한다.
-    return {
-        "command": ad_command,
-        "weight": round(
-            ad_weight,
-            4,
-        ),
-    }, info
-
-
-# ============================================================
-# 14. 서버 반환 command 생성
-# ============================================================
-
-def make_stop_command():
-    """
-    모든 이동/조향 입력을 해제한 command를 만든다.
-
-    'STOP'이라는 별도 명령을 보내는 것이 아니라
-    command="" / weight=0 형태로 입력을 해제한다.
-    """
-
-    return {
-        # 전진/후진 입력 해제.
-        "moveWS": {
-            "command": "",
-            "weight": 0.0,
-        },
-
-        # 좌/우 조향 입력 해제.
-        "moveAD": {
-            "command": "",
-            "weight": 0.0,
-        },
-
-        # 포탑 좌/우 입력 해제.
-        "turretQE": {
-            "command": "",
-            "weight": 0.0,
-        },
-
-        # 포탑 상/하 입력 해제.
-        "turretRF": {
-            "command": "",
-            "weight": 0.0,
-        },
-
-        # 발사하지 않음.
-        "fire": False,
-    }
-
-
-def make_longitudinal_command(
-    pid_output,
-):
-    """
-    속도 PID의 -1~+1 출력을 서버 moveWS 명령으로 변환한다.
-
-    pid_output > 0  -> W
-    pid_output < 0  -> S
-    pid_output ≈ 0  -> 입력 해제
-    """
-
-    # 너무 작은 PID 출력은 제어 노이즈로 보고 무시한다.
-    deadband = 0.02
-
-    # 양수 PID 출력이면 전진.
-    if pid_output > deadband:
-        ws_command = "W"
-
-        # 서버 weight 범위인 0~1로 제한한다.
-        ws_weight = clamp(
-            pid_output,
-            0.0,
-            1.0,
-        )
-
-    # 음수 PID 출력이면 S.
-    # 시뮬레이터에서는 감속/후진 방향 입력이다.
-    elif pid_output < -deadband:
-        ws_command = "S"
-
-        # weight는 양수로 보내야 하므로 절댓값 사용.
-        ws_weight = clamp(
-            abs(pid_output),
-            0.0,
-            1.0,
-        )
-
-    # deadband 안이면 가속/제동 입력 없음.
-    else:
-        ws_command = ""
-        ws_weight = 0.0
-
-    # 서버가 요구하는 command JSON 형식으로 반환한다.
-    return {
-        "moveWS": {
-            "command": ws_command,
-            "weight": round(
-                ws_weight,
-                4,
-            ),
-        },
-
-        # 이 함수는 longitudinal만 담당하므로
-        # 조향은 빈 상태로 생성한다.
-        # 서버에서 calculate_steering_command() 결과를 나중에 덮어쓴다.
-        "moveAD": {
-            "command": "",
-            "weight": 0.0,
-        },
-
-        # 포탑 제어는 이 모듈의 대상이 아니므로 비활성.
-        "turretQE": {
-            "command": "",
-            "weight": 0.0,
-        },
-
-        "turretRF": {
-            "command": "",
-            "weight": 0.0,
-        },
-
-        "fire": False,
-    }
-
-
-# ============================================================
-# 15. 외부 서버에서 호출할 초기화 함수
-# ============================================================
-
-def reset_pid_controllers():
-    """
-    목적지가 바뀌거나 episode가 초기화될 때 호출한다.
-
-    이전 목적지에서 누적된 PID의 I/D 상태가
-    새 목적지 제어에 영향을 주지 않도록 한다.
-    """
-
-    # 속도 PID 초기화.
-    speed_pid.reset()
-
-    # 조향 PID 초기화.
-    steering_pid.reset()
-
-
-def reset_speed_state():
-    """
-    /info 기반 속도 추정 상태를 초기화한다.
-
-    시뮬레이터 재시작/episode 초기화 시 이전 위치와 시간이
-    새 episode의 속도 계산에 섞이는 것을 방지한다.
-    """
-
-    global info_speed_kmh
-    global info_previous_position
-    global info_previous_time
-
-    # 현재 필터링 속도 삭제.
-    info_speed_kmh = None
-
-    # 이전 위치 삭제.
-    info_previous_position = None
-
-    # 이전 측정 시간 삭제.
-    info_previous_time = None
-
-
-
-def reset_all_controller_state():
-    """
-    PID 제어와 /info 속도 추정 상태를 모두 초기화한다.
-
-    사용 시점
-    ---------
-    - /init
-    - 시뮬레이터 episode 재시작
-    - 주행을 처음부터 다시 시작할 때
-
-    초기화 항목
-    -----------
-    speed_pid
-    steering_pid
-    last_control_time
-    arrival_latched
-    last_pid_destination
-    final_brake_start_time
-    info_speed_kmh
-    info_previous_position
-    info_previous_time
-
-    왜 필요한가
-    -----------
-    새 episode에서 이전 주행의 PID 오차,
-    목적지 도착 상태, 제동 timer, 속도 추정 기준이
-    남아 있지 않도록 한 번에 정리하기 위한 함수다.
-    """
-
-    # PID + /get_action 제어 상태 전체 초기화.
-    reset_control_state(
-        reset_destination=True
-    )
-
-    # /info 기반 속도 추정 상태 초기화.
-    reset_speed_state()
-
-# ============================================================
-# 15. 서버용 상위 주행 제어 클래스
-# ============================================================
-
-class TankDriveController:
-    """
-    Flask 서버에서 주행 관련 상태/분기문을 제거하기 위한 facade 클래스.
-
-    서버는 다음 메서드만 호출하면 된다.
-        handle_info(data)
-        get_action(data)
-        handle_set_destination(data)
-        handle_update_obstacles(data)
-        initialize(start_position)
-
-    내부에서는 기존 PID 함수와 D* Lite/Risk planner를 그대로 재사용한다.
-    """
-
-    def __init__(self, path_planner: DStarLitePlanner, save_path="terrain_map"):
-        self.path_planner = path_planner
-        self.save_path = save_path
-        self.planner_lock = threading.RLock()
-
-        self.stop_flag = False
-        self.path = []
-        self.destination = None          # (x, y, z)
-        self.all_info = {}
-        self.initialized = False
-
-    @staticmethod
-    def _stop_response():
-        return make_stop_command()
-
-    @staticmethod
-    def _extract_xz_from_action(data):
-        position = (data or {}).get("position", {})
-        return [
-            float(position.get("x", 0.0)),
-            float(position.get("z", 0.0)),
-        ]
-
-    def _current_info_position(self):
-        player_pos = (self.all_info or {}).get("playerPos", {})
-        x = player_pos.get("x")
-        z = player_pos.get("z")
-        if x is None or z is None:
-            return None
-        return [float(x), float(z)]
-
-    def _destination_xz(self):
-        if self.destination is None:
-            return None
-        return (float(self.destination[0]), float(self.destination[2]))
-
-    def _replan(self, current_position, force=False):
-        destination_xz = self._destination_xz()
-        if destination_xz is None or current_position is None:
-            return self.path
-
-        with self.planner_lock:
-            new_path = self.path_planner.replan_if_needed(
-                current_position,
-                destination_xz,
-                save_path=self.save_path,
-                force=force,
+        if steer_output > 0.0:
+            ad_command = "D"
+            ad_weight = min(
+                abs(steer_output),
+                self.STEER_MAX_WEIGHT,
             )
 
-        if new_path is not None:
-            self.path = new_path
-        return self.path
+        elif steer_output < 0.0:
+            ad_command = "A"
+            ad_weight = min(
+                abs(steer_output),
+                self.STEER_MAX_WEIGHT,
+            )
 
-    def handle_info(self, data):
-        """/info의 상태 저장 + 속도 갱신 + 응답 생성을 모두 처리한다."""
-        if not data:
-            return {"error": "No JSON received"}, 400
+        else:
+            ad_command = ""
+            ad_weight = 0.0
 
-        self.all_info = data
-        player_pos = data.get("playerPos", {})
-        x = player_pos.get("x")
-        z = player_pos.get("z")
+        info = {
+            "target_point": (
+                tx,
+                tz,
+            ),
+            "target_index": target_index,
+            "lookahead_m": lookahead_distance,
+            "target_heading_deg": target_heading_deg,
+            "body_yaw_deg": body_yaw_deg,
+            "heading_error_deg": heading_error_deg,
+            "steer_output": steer_output,
+        }
 
-        if x is not None and z is not None:
-            update_info_speed(data, [x, z])
-
-        return {"status": "success", "control": ""}, 200
-
-    def handle_set_destination(self, data):
-        self.save_path = []
-        self.stop_flag = True
-
-        """/set_destination의 검증, 파싱, 내부 상태 초기화를 처리한다."""
-        if not data or "destination" not in data:
-            return {"status": "ERROR", "message": "Missing destination data"}, 400
-
-        try:
-            x, y, z = map(float, data["destination"].split(","))
-        except (TypeError, ValueError) as e:
-            return {"status": "ERROR", "message": f"Invalid format: {e}"}, 400
-
-        self.destination = (x, y, z)
-        check_destination_change((x, z))
-
-        # 이미 episode가 시작된 상태라면 새 목적지로 즉시 재계획한다.
-        current_position = self._current_info_position()
-        if self.initialized and current_position is not None:
-            self._replan(current_position, force=True)
+        print(
+            "[STEER]",
+            "pos=",
+            current_position,
+            "target=",
+            target_point,
+            "target_index=",
+            target_index,
+            "heading_error=",
+            heading_error_deg,
+        )
 
         return {
-            "status": "OK",
-            "destination": {"x": x, "y": y, "z": z},
-        }, 200
+            "command": ad_command,
+            "weight": round(
+                ad_weight,
+                4,
+            ),
+        }, info
 
-    def handle_update_obstacles(self, data):
-        """/update_obstacle의 검증, obstacle 반영, 필요 시 강제 재계획을 처리한다."""
-        if not data:
-            return {"status": "error", "message": "No data received"}, 400
+    # --------------------------------------------------------
+    # /get_action
+    # --------------------------------------------------------
 
-        with self.planner_lock:
-            self.path_planner.update_dstar_obstacles_from_payload(data)
-
-        if self.initialized:
-            self._replan(self._current_info_position(), force=True)
-
-        return {"status": "success", "message": "Obstacle data received"}, 200
-
-    def initialize(self, start_position=(60.0, 27.23), load_risk_layers=True):
-        """episode 시작 시 planner/PID 상태와 최초 경로를 초기화한다."""
-        reset_all_controller_state()
-
-        with self.planner_lock:
-            if load_risk_layers and hasattr(self.path_planner, "set_risk_layers"):
-                self.path_planner.set_risk_layers()
-            self.path_planner.reset_replan_tracking()
-
-        self.initialized = True
-        self.path = []
-        self._replan(start_position, force=True)
-        return self.path
-
-    def get_action(self, data):
+    def get_action(
+        self,
+        data: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         """
-        /get_action의 전체 주행 판단을 수행한다.
+        Flask /get_action endpoint의 전체 주행 제어를 수행한다.
 
-        Flask 서버는 request JSON을 그대로 넘기고 반환 dict를 jsonify 하면 된다.
+        서버에서는 이 메서드 한 번만 호출하면
+        D* Lite 경로 갱신, 조향, 코너 감속, 목적지 감속,
+        속도 PID, 도착 정지가 모두 처리된다.
+
+        Args:
+            data:
+                request.get_json(force=True) 결과.
+
+        Returns:
+            시뮬레이터에 보낼 command dictionary.
         """
-
         if self.stop_flag:
             self.stop_flag = False
             return {
-                "moveWS": {"command": "STOP", "weight": 0.0},
+                "moveWS": {"command": "STOP", "weight": 1.0},
                 "moveAD": {"command": "", "weight": 0.0},
                 "turretQE": {"command": "", "weight": 0.0},
                 "turretRF": {"command": "", "weight": 0.0},
                 "fire": False
             }
         
-        current_position = self._extract_xz_from_action(data)
-        self._replan(current_position)
+        data = data or {}
 
-        destination_xz = self._destination_xz()
-        if destination_xz is None or not self.path:
-            return self._stop_response()
+        position = data.get(
+            "position",
+            {},
+        )
 
-        current_speed_kmh = read_player_speed_kmh()
-        body_yaw_deg = read_player_body_yaw_deg(self.all_info or {})
-        if current_speed_kmh is None or body_yaw_deg is None:
-            return self._stop_response()
+        fallback_x = (
+            self.current_pos[0]
+            if self.current_pos is not None
+            else 0.0
+        )
 
-        check_destination_change(destination_xz)
-        now, dt = get_control_dt()
+        fallback_z = (
+            self.current_pos[1]
+            if self.current_pos is not None
+            else 0.0
+        )
+
+        pos_x = float(
+            position.get(
+                "x",
+                fallback_x,
+            )
+        )
+
+        pos_z = float(
+            position.get(
+                "z",
+                fallback_z,
+            )
+        )
+
+        # D* Lite grid 이동 여부를 판단하기 위해 직전 위치를 보존한다.
+        previous_pos = self.current_pos
+
+        self.current_pos = [
+            pos_x,
+            pos_z,
+        ]
+
+        if self.dest is None:
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+            self.last_control_time = None
+            return make_stop_command()
+
+        current_speed_kmh = (
+            self.info_speed_kmh
+        )
+
+        if current_speed_kmh is None:
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+
+            print(
+                "[/get_action] "
+                "/info 속도 계산 전이므로 "
+                "제어 명령을 보내지 않습니다."
+            )
+
+            return make_stop_command()
+
+        body_yaw_deg = (
+            self._read_player_body_yaw_deg()
+        )
+
+        if body_yaw_deg is None:
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+
+            print(
+                "[/get_action] "
+                "/info의 playerBodyX가 없어 "
+                "제어 명령을 보내지 않습니다."
+            )
+
+            return make_stop_command()
+
+        destination_signature = (
+            round(
+                float(self.dest[0]),
+                3,
+            ),
+            round(
+                float(self.dest[1]),
+                3,
+            ),
+        )
+
+        if (
+            destination_signature
+            != self.last_pid_destination
+        ):
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+
+            self.last_control_time = None
+            self.arrival_latched = False
+            self.last_pid_destination = (
+                destination_signature
+            )
+
+        now = time.monotonic()
+
+        dt = (
+            0.05
+            if self.last_control_time is None
+            else clamp(
+                now - self.last_control_time,
+                0.01,
+                0.25,
+            )
+        )
+
+        self.last_control_time = now
+
+        # ----------------------------------------------------
+        # 1) 현재 위치 기준 D* Lite 경로 갱신
+        # ----------------------------------------------------
+        try:
+            old_grid = (
+                self.planner.world_to_grid(
+                    previous_pos,
+                    clamp=True,
+                )
+                if previous_pos
+                else None
+            )
+
+            new_grid = (
+                self.planner.world_to_grid(
+                    self.current_pos,
+                    clamp=True,
+                )
+            )
+
+            # 현재 복구된 서버와 동일하게 grid가 바뀌면 경로를 다시 계산한다.
+            if (
+                old_grid != new_grid
+                or not self.current_path
+            ):
+                with self.planner_lock:
+                    self.current_path = (
+                        self.planner.find_path(
+                            self.current_pos,
+                            self.dest,
+                            self.latest_info
+                        )
+                    )
+
+        except ValueError as exc:
+            print(
+                "D* Lite 경로 계산 실패:",
+                exc,
+            )
+            self.current_path = []
+
+        if not self.current_path:
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+
+            print(
+                "[/get_action] "
+                "D* Lite 경로가 없어 차량을 정지합니다."
+            )
+
+            return make_stop_command()
+
+        # ----------------------------------------------------
+        # 2) 최종 목적지까지 거리
+        # ----------------------------------------------------
+        goal_dx = (
+            float(self.dest[0])
+            - pos_x
+        )
+
+        goal_dz = (
+            float(self.dest[1])
+            - pos_z
+        )
 
         distance_to_goal = math.hypot(
-            destination_xz[0] - current_position[0],
-            destination_xz[1] - current_position[1],
+            goal_dx,
+            goal_dz,
         )
 
-        arrival_command = update_arrival_state(
-            distance_to_goal=distance_to_goal,
-            current_speed_kmh=current_speed_kmh,
-            now=now,
-        )
-        if arrival_command is not None:
-            return arrival_command
-
-        steering_command, steering_info = calculate_steering_command(
-            current_position=current_position,
+        # ----------------------------------------------------
+        # 3) 조향 계산
+        # ----------------------------------------------------
+        (
+            steering_command,
+            steering_info,
+        ) = self._calculate_steering_command(
+            current_position=self.current_pos,
             body_yaw_deg=body_yaw_deg,
-            path=self.path,
+            path=self.current_path,
             current_speed_kmh=current_speed_kmh,
             dt=dt,
         )
-        if steering_info is None:
-            return self._stop_response()
 
-        upcoming_corner = find_upcoming_corner(
-            path=self.path,
-            current_position=current_position,
+        heading_error_deg = (
+            0.0
+            if steering_info is None
+            else steering_info[
+                "heading_error_deg"
+            ]
         )
-        corner_speed_limit_kmh = calculate_corner_speed_limit(upcoming_corner)
-        destination_speed_limit_kmh = calculate_target_speed_kmh(distance_to_goal)
+
+        # ----------------------------------------------------
+        # 4) 목적지 제동거리 / 속도 PID
+        # ----------------------------------------------------
+        current_speed_mps = (
+            current_speed_kmh / 3.6
+        )
+
+        brake_reaction_distance = (
+            current_speed_mps * dt
+        )
+
+        physical_braking_distance = (
+            current_speed_mps ** 2
+            / (
+                2.0
+                * self.PLANNED_BRAKE_DECEL_MPS2
+            )
+        )
+
+        brake_trigger_distance = (
+            physical_braking_distance
+            + brake_reaction_distance
+        )
+
+        print(
+            "[ARRIVAL CHECK]",
+            f"distance={distance_to_goal:.2f}m",
+            f"stop_distance={self.STOP_DISTANCE_M:.2f}m",
+            f"arrival_latched={self.arrival_latched}",
+        )
+
+        # 목적지 반경 진입 후에는 다시 일반 주행으로 돌아가지 않는다.
+        if (
+            self.arrival_latched
+            or distance_to_goal
+            <= self.STOP_DISTANCE_M
+        ):
+            self.arrival_latched = True
+
+            if (
+                current_speed_kmh
+                > self.STOP_SPEED_KMH
+            ):
+                # 목표속도 0 km/h.
+                final_speed_error_kmh = (
+                    -current_speed_kmh
+                )
+
+                final_pid_output = (
+                    self.speed_pid.update(
+                        final_speed_error_kmh,
+                        dt,
+                    )
+                )
+
+                # 목적지에서는 전진 PID 출력을 허용하지 않는다.
+                final_pid_output = min(
+                    0.0,
+                    final_pid_output,
+                )
+
+                command = (
+                    make_longitudinal_command(
+                        final_pid_output,
+                        current_speed_kmh
+                    )
+                )
+
+                state = "FINAL_BRAKING"
+
+            else:
+                self.speed_pid.reset()
+                self.steering_pid.reset()
+
+                command = (
+                    make_stop_command()
+                )
+
+                state = "ARRIVED_STOP"
+
+            # 최종 제동 중에는 조향 입력을 해제한다.
+            command["moveAD"] = {
+                "command": "",
+                "weight": 0.0,
+            }
+
+            print(
+                f"[/get_action CTRL] {state} | "
+                f"pos=({pos_x:.2f},{pos_z:.2f}) "
+                f"dest=({self.dest[0]:.2f},{self.dest[1]:.2f}) "
+                f"distance={distance_to_goal:.2f}m "
+                f"speed={current_speed_kmh:.2f}km/h "
+                f"WS={command['moveWS']} "
+                f"AD={command['moveAD']}"
+            )
+
+            return command
+
+        # 반응거리 이후 실제로 사용할 수 있는 목적지 감속 거리 [m].
+        destination_usable_distance = max(
+            0.0,
+            distance_to_goal
+            - brake_reaction_distance,
+        )
+
+        destination_target_speed_kmh = (
+            self._calculate_target_speed_kmh(
+                destination_usable_distance
+            )
+        )
+
+        # 조향 target과 동일한 다음 vertex를 코너 속도 기준으로 사용한다.
+        target_index = (
+            None
+            if steering_info is None
+            else steering_info[
+                "target_index"
+            ]
+        )
+
+        upcoming_corner = (
+            calculate_next_vertex_corner(
+                path=self.current_path,
+                current_position=self.current_pos,
+                target_index=target_index,
+            )
+        )
+
+        corner_speed_limit_kmh = (
+            self._calculate_corner_speed_limit(
+                corner=upcoming_corner,
+                current_speed_kmh=current_speed_kmh,
+                dt=dt,
+                normal_speed_kmh=self.MAX_SPEED_KMH,
+            )
+        )
+
+        alignment_speed_limit_kmh = (
+            self._calculate_alignment_speed_limit(
+                heading_error_deg=heading_error_deg,
+                normal_speed_kmh=self.MAX_SPEED_KMH,
+            )
+        )
+
+        # 목적지/코너/정렬/최고속도 중 가장 낮은 값을 실제 목표속도로 사용한다.
         target_speed_kmh = min(
-            destination_speed_limit_kmh,
+            destination_target_speed_kmh,
             corner_speed_limit_kmh,
+            alignment_speed_limit_kmh,
+            self.MAX_SPEED_KMH,
         )
 
-        pid_output = speed_pid.update(
-            target_speed_kmh - current_speed_kmh,
-            dt,
+        speed_error_kmh = (
+            target_speed_kmh
+            - current_speed_kmh
         )
-        command = make_longitudinal_command(pid_output)
-        command = apply_alignment_speed_limit(
-            command=command,
-            heading_error_deg=steering_info["heading_error_deg"],
-            current_speed_kmh=current_speed_kmh,
+
+        pid_output = (
+            self.speed_pid.update(
+                speed_error_kmh,
+                dt,
+            )
         )
-        command["moveAD"] = steering_command
+
+        if (
+            distance_to_goal
+            <= brake_trigger_distance
+        ):
+            # 목적지 제동 영역에서는 PID가 양수여도 전진하지 않는다.
+            braking_pid_output = min(
+                0.0,
+                pid_output,
+            )
+
+            command = (
+                make_longitudinal_command(
+                    braking_pid_output,
+                    current_speed_kmh
+                )
+            )
+
+            state = "BRAKING_FOR_GOAL"
+
+        else:
+            command = (
+                make_longitudinal_command(
+                    pid_output,
+                    current_speed_kmh
+                )
+            )
+
+            state = (
+                "ACCELERATING"
+                if pid_output > 0.02
+                else "BRAKING"
+                if pid_output < -0.02
+                else "COASTING"
+            )
+
+        # 종방향 명령에 조향 명령을 결합한다.
+        command["moveAD"] = (
+            steering_command
+        )
+
+        if upcoming_corner is not None:
+            corner_x, corner_z = (
+                upcoming_corner["point"]
+            )
+
+            radius_value = (
+                upcoming_corner["radius"]
+            )
+
+            radius_text = (
+                "inf"
+                if math.isinf(
+                    float(radius_value)
+                )
+                else f"{float(radius_value):.2f}"
+            )
+
+            print(
+                f"[/get_action CORNER] "
+                f"target_index={upcoming_corner['index']} "
+                f"point=({corner_x:.2f},{corner_z:.2f}) "
+                f"distance={upcoming_corner['distance']:.2f}m "
+                f"angle={upcoming_corner['angle']:.2f}deg "
+                f"radius={radius_text}m "
+                f"limit={corner_speed_limit_kmh:.2f}km/h"
+            )
+
+        else:
+            print(
+                f"[/get_action CORNER] "
+                f"target_index={target_index} "
+                f"corner=None | "
+                f"limit={corner_speed_limit_kmh:.2f}km/h"
+            )
+
+        if steering_info is not None:
+            target_x, target_z = (
+                steering_info["target_point"]
+            )
+
+            print(
+                f"[/get_action STEER] "
+                f"yaw={body_yaw_deg:.2f}deg "
+                f"target=({target_x:.2f},{target_z:.2f}) "
+                f"targetYaw={steering_info['target_heading_deg']:.2f}deg "
+                f"error={heading_error_deg:.2f}deg "
+                f"lookahead={steering_info['lookahead_m']:.2f}m "
+                f"AD={command['moveAD']}"
+            )
+
+        print(
+            f"[/get_action CTRL] {state} | "
+            f"pos=({pos_x:.2f},{pos_z:.2f}) "
+            f"dest=({self.dest[0]:.2f},{self.dest[1]:.2f}) "
+            f"distance={distance_to_goal:.2f}m "
+            f"brake_at={brake_trigger_distance:.2f}m "
+            f"targetSpeed={target_speed_kmh:.2f}km/h "
+            f"cornerLimit={corner_speed_limit_kmh:.2f}km/h "
+            f"speed={current_speed_kmh:.2f}km/h "
+            f"speedError={speed_error_kmh:.2f} "
+            f"speedPID={pid_output:.3f} "
+            f"WS={command['moveWS']} "
+            f"AD={command['moveAD']}"
+        )
+
         return command
-
