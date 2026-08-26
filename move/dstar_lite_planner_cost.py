@@ -231,7 +231,7 @@ class DStarPlanner:
         if self.is_enemy:
             return self.in_bounds(node) and node not in self.obstacles
         else:
-            return self.in_bounds(node) and node not in self.obstacles and node not in self.last_enemy_tank
+            return self.in_bounds(node) and node not in self.obstacles and node not in self.movable_enemy_tank
 
     def heuristic(self, a, b):
         dx = abs(a[0] - b[0])
@@ -664,26 +664,63 @@ class DStarPlanner:
         # self.movable_enemy_tank
         # 움직일 수 있는 적 전차 위치에 대한 변수 업데이트
         if latest_info != None:
-            self.movable_enemy_tank= set([])
-            enmey_pos = self.world_to_grid((latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]), clamp=True)
-            min_x = max(enmey_pos[0]-15, 0)
-            max_x = min(enmey_pos[0]+15, 300)
-            min_z = max(enmey_pos[1]-15, 0)
-            max_z = min(enmey_pos[1]+15, 300)
+            self.movable_enemy_tank = set([])
+            
+            # 1. 원본 데이터 추출 (km/h)
+            enemy_raw_x = latest_info["enemyPos"]["x"]
+            enemy_raw_z = latest_info["enemyPos"]["z"]
+            enemy_pos = self.world_to_grid((enemy_raw_x, enemy_raw_z), clamp=True)
+            
+            enemy_yaw_deg = float(latest_info.get("enemyTurretX", 0.0))
+            enemy_speed_kmh = float(latest_info.get("enemySpeed", 0.0))
+            
+            # [단위 변환] km/h -> m/s
+            enemy_speed_ms = enemy_speed_kmh / 3.6
+            
+            # 2. 딜레이 극복 시간 보정 (초 단위)
+            # 0.1초마다 호출되더라도 누적 딜레이가 있다면 0.5~0.6초 앞을 예측하는 것이 안전합니다.
+            latency_sec = 0.8
+            predict_distance = enemy_speed_ms * latency_sec
 
+            # 3. 0도 정북 / 시계방향 회전 삼각함수 정밀 변환
+            yaw_rad = math.radians(enemy_yaw_deg)
+            predict_distance_x = predict_distance * math.sin(yaw_rad)
+            predict_distance_z = predict_distance * math.cos(yaw_rad)
+            
+            # 미래 예상 세계 좌표 계산 후 그리드 맵 좌표로 변환
+            pred_x = enemy_raw_x + predict_distance_x
+            pred_z = enemy_raw_z + predict_distance_z
+            pred_enemy_pos = self.world_to_grid((pred_x, pred_z), clamp=True)
+
+            # 4. 동적 안전 바리케이드 마진 설정
+            # 적이 정면으로 들이받는 경우를 대비해 기본 마진을 설정하고 속도 비례 마진을 더합니다.
+            base_margin = 15
+            speed_bonus_margin = int(enemy_speed_ms * 0.6) 
+            total_margin = base_margin + speed_bonus_margin
+
+            # 그리드 경계값 예외 처리 (0 ~ 300 맵 기준)
+            min_x = max(pred_enemy_pos[0] - total_margin, 0)
+            max_x = min(pred_enemy_pos[0] + total_margin, 300)
+            min_z = max(pred_enemy_pos[1] - total_margin, 0)
+            max_z = min(pred_enemy_pos[1] + total_margin, 300)
+
+            # 5. D* Lite 격자 지도에 차단 영역 주입
             for x in range(min_x, max_x):
                 for z in range(min_z, max_z):
-                    self.movable_enemy_tank.add((x,z))
+                    self.movable_enemy_tank.add((x, z))
 
+            start_grid = self.world_to_grid(current_pos, clamp=True)
+            for sx in range(start_grid[0] - 1, start_grid[0] + 2):
+                for sz in range(start_grid[1] - 1, start_grid[1] + 2):
+                    self.movable_enemy_tank.discard((sx, sz)) # 안전하게 차단 해제
+
+            # 5. D* Lite 증분 업데이트 (변경된 셀만 큐에 push)
             changed_cells = self.last_enemy_tank.symmetric_difference(self.movable_enemy_tank)
             for node in changed_cells:
                 if self.in_bounds(node):
                     self.update_vertex(node)
                     for neighbor in self.get_neighbors(node):
                         self.update_vertex(neighbor)
-
-            # 4. 다음 0.1초 뒤의 비교를 위해 현재 상태를 백업
-            self.last_enemy_tank = self.movable_enemy_tank.copy() 
 
         start = self.world_to_grid(current_pos, clamp=True)
         goal = self.world_to_grid(dest, clamp=True)
