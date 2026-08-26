@@ -162,6 +162,15 @@ class DStarPlanner:
         loaded_data = np.rot90(loaded_data, k=-1)
         self.update_entire_heightmap(loaded_data)
 
+        # update_y_from_nature()가 매번 디스크에서 다시 읽지 않도록 캐싱.
+        # 지형 자체는 게임 도중 안 바뀌는 정적 데이터라 한 번만 읽으면 된다.
+        self._cached_base_heightmap = loaded_data
+
+        # update_y_from_nature()가 "지난번과 nature 배치가 똑같으면
+        # 재계산을 건너뛰기" 위해 기억해두는 서명. None이면 아직 한 번도
+        # 계산 안 한 상태라는 뜻이라 최초 1회는 무조건 계산한다.
+        self._last_nature_signature = None
+
 
     def update_dstar_obstacles_from_payload(self, payload: dict):
         obs_list = []
@@ -344,6 +353,177 @@ class DStarPlanner:
 
     def get_clearance_cost(self, node):
         return self.clearance_costs.get(node, 0.0)
+
+    def rebuild_clearance_costs_incremental(self, newly_obstacle_cells, newly_freed_cells):
+        """
+        rebuild_clearance_costs()의 증분(incremental) 버전.
+
+        기존 rebuild_clearance_costs()는 오브젝트 하나만 추가돼도 매번
+        self.obstacles 전체를 소스로 삼아 300x300 격자 전체에 다시
+        multi-source Dijkstra를 돌렸다. 실제로 값이 바뀌는 범위는
+        "이번에 새로 막히거나/뚫린 셀 주변, clearance_radius 이내"뿐이라
+        대부분 낭비였다.
+
+        Parameters
+        ----------
+        newly_obstacle_cells : Iterable[GridNode]
+            이번 set_obstacles() 호출로 새로 '막힌' 셀들
+            (changed_cells 중 지금 self.obstacles에 있는 것).
+        newly_freed_cells : Iterable[GridNode]
+            이번 호출로 새로 '뚫린' 셀들
+            (changed_cells 중 지금 self.obstacles에 없는 것).
+
+        정확성에 대한 설명
+        ------------------
+        1) 새로 막힌 셀(newly_obstacle_cells):
+           이 셀들만 소스로 삼아 clearance_radius까지 bounded Dijkstra로
+           확장하되, 어떤 free 셀에 대해 "새로 계산한 거리가 기존에
+           저장된 거리보다 짧을 때만" 갱신한다. 장애물 추가는 거리를
+           줄일 수만 있지(더 가까운 장애물이 새로 생기는 것) 늘릴 수는
+           없으므로, 이 방식이 전체 재계산과 결과가 100% 동일하다.
+
+        2) 새로 뚫린 셀(newly_freed_cells):
+           장애물이 없어지면 주변 셀들의 '가장 가까운 장애물까지 거리'가
+           멀어질 수 있어서(비용이 낮아짐), 국소적으로 처음부터 다시
+           계산해야 한다. 다만 그 영향 범위가 clearance_radius를 넘을 수
+           없으므로, 뚫린 셀 주변 clearance_radius*2 반경 안의 '진짜
+           남아있는 장애물'만 소스로 삼아 그 창(window) 안쪽만 다시
+           계산한다 (radius*2인 이유: 윈도우 경계에 있는 셀의 최근접
+           장애물이 윈도우 밖, 최대 radius만큼 더 떨어진 곳에 있을 수
+           있어서 소스 탐색 범위를 그만큼 더 넓혀야 정확하다).
+        """
+        if (
+            self.clearance_radius <= 0.0
+            or self.clearance_weight <= 0.0
+        ):
+            self.clearance_costs.clear()
+            self.obstacle_distances.clear()
+            return
+
+        directions = [
+            (1, 0, 1.0), (-1, 0, 1.0),
+            (0, 1, 1.0), (0, -1, 1.0),
+            (1, 1, math.sqrt(2.0)),
+            (1, -1, math.sqrt(2.0)),
+            (-1, 1, math.sqrt(2.0)),
+            (-1, -1, math.sqrt(2.0)),
+        ]
+
+        # ---- 1) 새로 막힌 셀: bounded 확장, 기존 값보다 짧을 때만 갱신 ----
+        if newly_obstacle_cells:
+            heap = []
+            seed_distance = {}
+
+            for node in newly_obstacle_cells:
+                seed_distance[node] = 0.0
+                heapq.heappush(heap, (0.0, node))
+                # 이제 이 셀 자신은 장애물이므로 clearance 대상에서 제외.
+                self.obstacle_distances.pop(node, None)
+                self.clearance_costs.pop(node, None)
+
+            while heap:
+                current_distance, node = heapq.heappop(heap)
+
+                if current_distance != seed_distance.get(node):
+                    continue
+                if current_distance > self.clearance_radius:
+                    continue
+
+                x, z = node
+
+                for dx, dz, step in directions:
+                    neighbor = (x + dx, z + dz)
+
+                    if not self.in_bounds(neighbor):
+                        continue
+                    if neighbor in self.obstacles:
+                        continue
+
+                    next_distance = current_distance + step
+
+                    if next_distance > self.clearance_radius:
+                        continue
+
+                    # 새로 생긴 장애물들 사이에서 계속 퍼져나가기 위한 갱신.
+                    if next_distance < seed_distance.get(neighbor, INF):
+                        seed_distance[neighbor] = next_distance
+                        heapq.heappush(heap, (next_distance, neighbor))
+
+                    # 전역 저장값 갱신은 "더 가까워졌을 때만".
+                    if next_distance < self.obstacle_distances.get(neighbor, INF):
+                        self.obstacle_distances[neighbor] = next_distance
+                        self.clearance_costs[neighbor] = (
+                            self.clearance_weight
+                            * math.exp(-next_distance / self.clearance_decay)
+                        )
+
+        # ---- 2) 새로 뚫린 셀: 국소 윈도우만 실제 장애물 기준 재계산 ----
+        if newly_freed_cells:
+            radius_cells = int(math.ceil(self.clearance_radius))
+
+            window = set()
+            for (fx, fz) in newly_freed_cells:
+                for dx in range(-radius_cells, radius_cells + 1):
+                    for dz in range(-radius_cells, radius_cells + 1):
+                        node = (fx + dx, fz + dz)
+                        if self.in_bounds(node):
+                            window.add(node)
+
+            source_radius = radius_cells * 2
+            sources = set()
+            for (fx, fz) in newly_freed_cells:
+                for dx in range(-source_radius, source_radius + 1):
+                    for dz in range(-source_radius, source_radius + 1):
+                        node = (fx + dx, fz + dz)
+                        if self.in_bounds(node) and node in self.obstacles:
+                            sources.add(node)
+
+            # 윈도우 안 값은 오래된 값이 남지 않도록 일단 지운다.
+            for node in window:
+                self.obstacle_distances.pop(node, None)
+                self.clearance_costs.pop(node, None)
+
+            if sources:
+                heap = []
+                local_distance = {}
+
+                for node in sources:
+                    local_distance[node] = 0.0
+                    heapq.heappush(heap, (0.0, node))
+
+                while heap:
+                    current_distance, node = heapq.heappop(heap)
+
+                    if current_distance != local_distance.get(node):
+                        continue
+                    if current_distance > self.clearance_radius:
+                        continue
+
+                    x, z = node
+
+                    for dx, dz, step in directions:
+                        neighbor = (x + dx, z + dz)
+
+                        if not self.in_bounds(neighbor):
+                            continue
+                        if neighbor in self.obstacles:
+                            continue
+
+                        next_distance = current_distance + step
+
+                        if next_distance > self.clearance_radius:
+                            continue
+
+                        if next_distance < local_distance.get(neighbor, INF):
+                            local_distance[neighbor] = next_distance
+                            heapq.heappush(heap, (next_distance, neighbor))
+
+                            if neighbor in window:
+                                self.obstacle_distances[neighbor] = next_distance
+                                self.clearance_costs[neighbor] = (
+                                    self.clearance_weight
+                                    * math.exp(-next_distance / self.clearance_decay)
+                                )
 
     def refresh_costmap(self):
         """장애물 셀이 외부에서 직접 변경됐을 때 비용맵과 탐색 상태 갱신."""
@@ -1090,15 +1270,36 @@ class DStarPlanner:
 
             나무와 바위에 대한 type 구분이 필요
             대충 사이즈로 판단하자 -> max-min >= 3.5 면 Rock으로 판단하고 진행하자
-        """
 
-        # 오브젝트가 제거된 경우 업데이트 했던 add_num만큼 다시 빼줘야 한다.
-        # 쉽게 고도정보 초기화로 가자
-        loaded_data = np.load('move/risk_layers.npz')
-        loaded_data = loaded_data['height']
-        loaded_data = np.flipud(loaded_data)
-        loaded_data = np.rot90(loaded_data, k=-1)
-        self.update_entire_heightmap(loaded_data)
+        최적화:
+            set_obstacles()가 호출될 때마다(예: 적 전차 1대 새로 탐지될 때마다)
+            매번 무조건 다시 불렸었는데, 원래 여기서 매번 (1) 디스크에서
+            risk_layers.npz를 다시 읽고 (2) 90000칸 고도맵 전체를 리셋하고
+            (3) nature(나무/바위) 오브젝트의 높이 보정을 처음부터 다시
+            계산하고 있었다. 근데 지형(nature) 배치는 게임 도중 거의 안
+            바뀌고, enemy_tank 같은 다른 타입 오브젝트가 추가된 것뿐이면
+            높이 데이터는 지난번 계산 결과와 100% 동일하다.
+
+            그래서 "지난번 호출 이후 nature 오브젝트 배치 자체가 실제로
+            바뀌었는지"를 서명(시그니처) 비교로 먼저 확인하고, 안 바뀌었으면
+            디스크 재로드도, 90000칸 순회도, 재계산도 전부 건너뛴다.
+        """
+        nature_signature = tuple(
+            sorted(
+                (obs.x_min, obs.x_max, obs.z_min, obs.z_max)
+                for obs in self.obstacle_rectangles
+                if obs.type == 'nature'
+            )
+        )
+
+        if nature_signature == self._last_nature_signature:
+            return
+
+        self._last_nature_signature = nature_signature
+
+        # 디스크에서 다시 읽지 않고 __init__에서 캐싱해둔 배열을 재사용한다.
+        # (지형 자체는 정적 데이터라 파일이 실행 중 바뀔 일이 없다.)
+        self.update_entire_heightmap(self._cached_base_heightmap)
         self.updated_y = []
 
         for obs in self.obstacle_rectangles: # Tree
@@ -1228,6 +1429,16 @@ class DStarPlanner:
         p2: 반복문으로 계속 받아오는 값으로(범위를 의미) min~max까지의 좌표값
         max_allowed_y: min~max안의 중심 좌표에 대한 고도 값
         num: +해줄 상수
+
+        성능 참고:
+            enemy_tank 오브젝트 하나당 패딩 반경(±49칸)에 걸리는 후보 셀이
+            최대 1만 개 안팎이고, 셀 하나마다 이 함수가 0.5 간격 raymarch로
+            길게는 100회 넘게 world_to_grid()를 호출한다 (탐지 1건당
+            world_to_grid 호출이 수십만 번까지 발생 -> 실측 dominant cost).
+            여기서는 매번 clamp=True로 호출하는데, 클램핑 이후 좌표는
+            반드시 grid 범위 안이라 world_to_grid() 내부의 in_bounds 검사가
+            항상 통과하는 중복 작업이다. 그래서 그 부분만 인라인으로 풀어
+            함수 호출/중복 검사 오버헤드를 없앴다 — 결과값은 완전히 동일하다.
         """
         x1, z1 = p1
         x2, z2 = p2
@@ -1235,34 +1446,44 @@ class DStarPlanner:
         if dist == 0: 
             return True
         
-        target_ix, target_iz = self.world_to_grid((x2, z2), True)
-        target_grid_y = self.y.get((target_ix, target_iz), 0)
+        width = self.width
+        height = self.height
+        y_get = self.y.get
+
+        target_ix = min(max(int(round(x2)), 0), width - 1)
+        target_iz = min(max(int(round(z2)), 0), height - 1)
+        target_grid_y = y_get((target_ix, target_iz), 0)
         
         step_size = 0.5
         steps = int(dist / step_size)
+        dx = x2 - x1
+        dz = z2 - z1
+        int_x1 = int(x1)
+        int_z1 = int(z1)
+
         for i in range(1, steps):
             t = i / steps
-            cx = x1 + (x2 - x1) * t
-            cz = z1 + (z2 - z1) * t
-            
-            ix, iz = self.world_to_grid((cx, cz), True)
-            
-            if 0 <= ix < self.width and 0 <= iz < self.height:
-                if (ix == target_ix and iz == target_iz) or (ix == int(x1) and iz == int(z1)):
-                    continue
-                    
-                curr_y = self.y.get((ix, iz), 0)
+            cx = x1 + dx * t
+            cz = z1 + dz * t
 
-                # 고도에 따른 시야에 대한 부분
-                # max_allowed_y: 오브젝트의 센터에 대한 고도값
-                # target_grid_y: 오브젝트의 범위 만큼 반복하는 (x,z)에 대한 고도값
-                # curr_y: 오브젝트와 반복문의 좌표를 이은 선에 대해 중간에 존재하는 고도값
-                if curr_y >= (max_allowed_y+num): # 중간에 존재하는 고도값이 오브젝트가 존재하는 고도값 + num 보다 높다면
-                    if (target_grid_y+num-1) <= curr_y:
-                        return False
-                    if target_grid_y <= (curr_y+0.5) and math.hypot(x2 - ix, z2 - iz) >= 6:
-                        # 중간의 고도가 target(x,z)의 고도보다 살짝 낮아도 거리 차이가 6이상이라면 지나갈 수 있도록
-                        return False
+            ix = min(max(int(round(cx)), 0), width - 1)
+            iz = min(max(int(round(cz)), 0), height - 1)
+
+            if (ix == target_ix and iz == target_iz) or (ix == int_x1 and iz == int_z1):
+                continue
+
+            curr_y = y_get((ix, iz), 0)
+
+            # 고도에 따른 시야에 대한 부분
+            # max_allowed_y: 오브젝트의 센터에 대한 고도값
+            # target_grid_y: 오브젝트의 범위 만큼 반복하는 (x,z)에 대한 고도값
+            # curr_y: 오브젝트와 반복문의 좌표를 이은 선에 대해 중간에 존재하는 고도값
+            if curr_y >= (max_allowed_y+num): # 중간에 존재하는 고도값이 오브젝트가 존재하는 고도값 + num 보다 높다면
+                if (target_grid_y+num-1) <= curr_y:
+                    return False
+                if target_grid_y <= (curr_y+0.5) and math.hypot(x2 - ix, z2 - iz) >= 6:
+                    # 중간의 고도가 target(x,z)의 고도보다 살짝 낮아도 거리 차이가 6이상이라면 지나갈 수 있도록
+                    return False
                     
         return True
     
@@ -1362,9 +1583,15 @@ class DStarPlanner:
 
         self.obstacles = new_obstacles
 
-        # 장애물 주변의 edge cost도 함께 바뀌므로 soft costmap을 다시 만들고
-        # 현재 시작점/목적지 기준으로 D* Lite 상태를 안전하게 재초기화한다.
-        self.rebuild_clearance_costs()
+        # 장애물 주변의 edge cost도 함께 바뀌므로 soft costmap을 갱신한다.
+        # 예전엔 매번 self.obstacles 전체로 rebuild_clearance_costs()를
+        # 새로 돌렸는데(300x300 전체 Dijkstra), changed_cells는 이미 위에서
+        # 정확히 계산돼 있으니 그 증분만 처리하는 게 훨씬 빠르다.
+        newly_obstacle_cells = changed_cells & self.obstacles
+        newly_freed_cells = changed_cells - self.obstacles
+        self.rebuild_clearance_costs_incremental(
+            newly_obstacle_cells, newly_freed_cells,
+        )
 
         for node in changed_cells:
             if self.in_bounds(node):

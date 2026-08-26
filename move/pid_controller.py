@@ -968,6 +968,41 @@ class TankDriveController:
 
             drive_controller.handle_object_detected(40, 46, 100, 106, obj_type='enemy_tank')
 
+        실제 처리(_process_object_detected)는 별도 데몬 스레드에서 돈다.
+        pad_object() -> set_obstacles()가 고도 데이터 재주입(90000칸 순회) +
+        clearance cost 재계산(Dijkstra)까지 하느라 실측 1~2초가 걸리는데,
+        이 함수가 planner_lock을 잡은 채로 그 시간만큼 호출자를 막으면
+        (특히 인식 파이프라인이 매 프레임 이걸 호출하는 상황이면) /get_action이
+        같은 락을 기다리다 실시간 제어 루프에 지연이 생길 수 있다. 그래서
+        이 메서드 자체는 스레드만 띄우고 즉시 리턴하고, 실제 상태 변경
+        (self.current_path/self.vehicle_mode 교체 등)은 그 스레드 안에서
+        여전히 planner_lock을 잡고 안전하게 수행한다.
+
+        Returns
+        -------
+        dict: {"status": "queued"} 고정. 처리 결과 자체는 비동기라 이
+              반환값으로는 알 수 없고, 필요하면 서버 콘솔 로그로 확인한다.
+        """
+        thread = threading.Thread(
+            target=self._process_object_detected,
+            args=(x_min, x_max, z_min, z_max, obj_type),
+            daemon=True,
+        )
+        thread.start()
+        return {"status": "queued"}
+
+    def _process_object_detected(
+        self,
+        x_min: float,
+        x_max: float,
+        z_min: float,
+        z_max: float,
+        obj_type: str = 'enemy_tank',
+    ) -> Dict[str, Any]:
+        """
+        handle_object_detected()가 백그라운드 스레드에서 실행하는 실제 로직.
+        직접 호출하지 말고 handle_object_detected()를 통해서만 사용한다.
+
         처리 순서:
             1) 오브젝트 패딩 처리 (planner.pad_object)
             2) 그로 인해 지금 self.current_path가 막혔는지 판단 (planner.is_path_blocked)
@@ -979,97 +1014,121 @@ class TankDriveController:
 
         Returns
         -------
-        dict: 상태 설명용. 서버/호출부가 로깅 등에 참고만 하면 된다.
+        dict: 상태 설명용. 백그라운드 스레드에서 도니 호출부로 리턴되지
+              않고, 예외 발생 시 콘솔에 출력한다.
         """
-        current_position = self.current_pos
-        destination_xz = self.dest
+        try:
+            # 패딩 자체는 목적지/현재 위치와 무관하게 항상 먼저 반영한다.
+            # (예: restart 직후, 아직 목적지를 안 정한 상태에서 화면에 적 전차가
+            # 잡혀도 맵에는 바로 반영되어야 한다.) 그 아래 "지금 경로가 막혔는지
+            # -> 후퇴/재탐색" 판단만 목적지/현재 위치가 있어야 의미가 있는
+            # 부분이라 그 시점에 가서 갈린다.
+            with self.planner_lock:
+                changed_cells = self.planner.pad_object(
+                    x_min, x_max, z_min, z_max, obj_type,
+                )
 
-        if current_position is None or destination_xz is None:
-            return {"status": "skipped", "reason": "position/destination not ready"}
+            if changed_cells:
+                # 실제로 뭔가 바뀌었을 때만 다시 그린다. 탐지는 매 프레임(예:
+                # /stereo_image가 계속 들어오는 상황) 반복 호출될 수 있는데,
+                # 매번 아무 변화 없어도 렌더 스레드를 새로 띄우면 낭비다.
+                self.render_map("D* Lite Map (오브젝트 탐지 갱신)")
 
-        with self.planner_lock:
-            changed_cells = self.planner.pad_object(
-                x_min, x_max, z_min, z_max, obj_type,
-            )
+            current_position = self.current_pos
+            destination_xz = self.dest
 
-            # current_path가 이미 비어있는 상태(예: 직전 재탐색 실패로 멈춰있는
-            # 상황)도 '막힘'으로 간주해야 한다 — 그렇지 않으면 is_path_blocked()가
-            # 빈 리스트에 대해 False를 반환해서 멈춰있는 차량을 그대로 방치한다.
-            blocked = (
-                not self.current_path
-                or self.planner.is_path_blocked(self.current_path)
-            )
-
-            if not blocked:
+            if current_position is None or destination_xz is None:
                 return {
-                    "status": "clear",
-                    "path_blocked": False,
+                    "status": "padded_only",
+                    "reason": "position/destination not ready",
                     "changed_cells": len(changed_cells or []),
                 }
 
-            current_grid = self.planner.world_to_grid(
-                current_position, clamp=True,
-            )
-            standing_on_blocked_cell = not self.planner.is_free(current_grid)
+            with self.planner_lock:
+                # current_path가 이미 비어있는 상태(예: 직전 재탐색 실패로 멈춰있는
+                # 상황)도 '막힘'으로 간주해야 한다 — 그렇지 않으면 is_path_blocked()가
+                # 빈 리스트에 대해 False를 반환해서 멈춰있는 차량을 그대로 방치한다.
+                blocked = (
+                    not self.current_path
+                    or self.planner.is_path_blocked(self.current_path)
+                )
 
-            if standing_on_blocked_cell:
-                retreat_path = self._build_retreat_path()
+                if not blocked:
+                    return {
+                        "status": "clear",
+                        "path_blocked": False,
+                        "changed_cells": len(changed_cells or []),
+                    }
 
-                if retreat_path is None:
-                    # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
-                    # 그 자리에서 강제 재탐색을 시도한다.
-                    #
-                    # 이 분기에 들어왔다는 것 자체가 "지금 서 있는 셀이 막혀
-                    # 있다"는 뜻이라 find_path()를 그대로 부르면 시작점 검증에서
-                    # 무조건 ValueError가 난다. 그래서 clear_start_area()로
-                    # 반경을 넓혀가며 실제로 뚫어주는 _find_path_with_recovery()를
-                    # 써야 한다. (단, latest_info 기반 적 전차 마스킹은 이 경로에서
-                    # 지원되지 않는다 — _find_path_with_recovery가 내부적으로
-                    # find_path(pos, dest)를 latest_info 없이 호출하기 때문.)
-                    new_path = self.planner._find_path_with_recovery(
-                        current_position, destination_xz,
-                    )
+                current_grid = self.planner.world_to_grid(
+                    current_position, clamp=True,
+                )
+                standing_on_blocked_cell = not self.planner.is_free(current_grid)
 
-                    self.current_path = new_path or []
-                    self.vehicle_mode = 'advance'
+                if standing_on_blocked_cell:
+                    retreat_path = self._build_retreat_path()
+
+                    if retreat_path is None:
+                        # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
+                        # 그 자리에서 강제 재탐색을 시도한다.
+                        #
+                        # 이 분기에 들어왔다는 것 자체가 "지금 서 있는 셀이 막혀
+                        # 있다"는 뜻이라 find_path()를 그대로 부르면 시작점 검증에서
+                        # 무조건 ValueError가 난다. 그래서 clear_start_area()로
+                        # 반경을 넓혀가며 실제로 뚫어주는 _find_path_with_recovery()를
+                        # 써야 한다. (단, latest_info 기반 적 전차 마스킹은 이 경로에서
+                        # 지원되지 않는다 — _find_path_with_recovery가 내부적으로
+                        # find_path(pos, dest)를 latest_info 없이 호출하기 때문.)
+                        new_path = self.planner._find_path_with_recovery(
+                            current_position, destination_xz,
+                        )
+
+                        self.current_path = new_path or []
+                        self.vehicle_mode = 'advance'
+                        self.speed_pid.reset()
+                        self.steering_pid.reset()
+
+                        return {
+                            "status": "forced_replan_no_history",
+                            "path_blocked": True,
+                            "changed_cells": len(changed_cells or []),
+                        }
+
+                    self.current_path = retreat_path
+                    self.vehicle_mode = 'retreat'
                     self.speed_pid.reset()
                     self.steering_pid.reset()
 
                     return {
-                        "status": "forced_replan_no_history",
+                        "status": "retreating",
+                        "path_blocked": True,
+                        "changed_cells": len(changed_cells or []),
+                        "retreat_points": len(retreat_path),
+                    }
+
+                else:
+                    try:
+                        new_path = self.planner.find_path(
+                            current_position, destination_xz, self.latest_info,
+                        )
+                    except ValueError as exc:
+                        print("D* Lite 강제 재탐색 실패:", exc)
+                        new_path = []
+
+                    self.current_path = new_path or []
+                    self.vehicle_mode = 'advance'
+
+                    return {
+                        "status": "replanned",
                         "path_blocked": True,
                         "changed_cells": len(changed_cells or []),
                     }
 
-                self.current_path = retreat_path
-                self.vehicle_mode = 'retreat'
-                self.speed_pid.reset()
-                self.steering_pid.reset()
-
-                return {
-                    "status": "retreating",
-                    "path_blocked": True,
-                    "changed_cells": len(changed_cells or []),
-                    "retreat_points": len(retreat_path),
-                }
-
-            else:
-                try:
-                    new_path = self.planner.find_path(
-                        current_position, destination_xz, self.latest_info,
-                    )
-                except ValueError as exc:
-                    print("D* Lite 강제 재탐색 실패:", exc)
-                    new_path = []
-
-                self.current_path = new_path or []
-                self.vehicle_mode = 'advance'
-
-                return {
-                    "status": "replanned",
-                    "path_blocked": True,
-                    "changed_cells": len(changed_cells or []),
-                }
+        except Exception as exc:
+            # 백그라운드 스레드라 예외가 호출자에게 안 올라간다. 콘솔에
+            # 남겨서 조용히 묻히지 않게 한다.
+            print(f"[_process_object_detected] 처리 실패: {exc}")
+            return {"status": "error", "message": str(exc)}
 
     # --------------------------------------------------------
     # 내부 상태 관리
