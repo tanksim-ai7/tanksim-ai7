@@ -667,7 +667,7 @@ class TankDriveController:
     # --------------------------------------------------------
 
     # 직선 기준 최고 목표속도 [km/h].
-    MAX_SPEED_KMH = 60.0
+    MAX_SPEED_KMH = 40.0
 
     # 목적지/코너 제동거리 계산에서 가정하는 계획 감속도 [m/s^2].
     PLANNED_BRAKE_DECEL_MPS2 = 1.5
@@ -725,7 +725,8 @@ class TankDriveController:
             raise ValueError(
                 "TankDriveController requires path_planner."
             )
-
+        
+        self.is_planner_running = False
         self.enemy_update_counter = 0
 
         self.stop_flag = False
@@ -2085,13 +2086,14 @@ class TankDriveController:
                 self.enemy_update_counter += 1
 
                 import copy # 최상단에 없다면 추가
-                if self.enemy_update_counter % 5 == 0:
-                    # [보완] deepcopy를 사용하여 멀티스레드 간 딕셔너리 데이터 간섭 에러를 원천 차단합니다.
-                    pass_info = copy.deepcopy(self.latest_info) if self.latest_info else None
-                else:
-                    # 렉 유발을 줄이기 위해 주입은 None으로 하되, 
-                    # 플래너 본체는 기존 적 장벽(movable_enemy_tank)을 지우지 않고 기억하고 주행합니다.
-                    pass_info = None
+                pass_info = copy.deepcopy(self.latest_info) if self.latest_info else None
+                # if self.enemy_update_counter % 5 == 0:
+                #     # [보완] deepcopy를 사용하여 멀티스레드 간 딕셔너리 데이터 간섭 에러를 원천 차단합니다.
+                #     pass_info = copy.deepcopy(self.latest_info) if self.latest_info else None
+                # else:
+                #     # 렉 유발을 줄이기 위해 주입은 None으로 하되, 
+                #     # 플래너 본체는 기존 적 장벽(movable_enemy_tank)을 지우지 않고 기억하고 주행합니다.
+                #     pass_info = None
 
                 if not getattr(self, "is_planner_running", False):
                     self.is_planner_running = True
