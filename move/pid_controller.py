@@ -813,7 +813,7 @@ class TankDriveController:
         # 기록이 따로 없기 때문에 이 리스트를 새로 둔다.
         self.position_history: List[PointXZ] = []
         self._history_min_step_m = 3.0    # 이 거리 이상 움직였을 때만 기록 (노이즈/중복 방지)
-        self._history_max_points = 300    # 무한정 쌓이지 않게 상한
+        self._history_max_points = 100    # 무한정 쌓이지 않게 상한
         # 한 번 후퇴할 때 되돌아갈 거리.
         # set_obstacles()의 obj_type별 padding 반경(예: enemy_tank는
         # grid 49칸)보다 짧으면 breadcrumb을 아무리 되짚어도 여전히
@@ -903,6 +903,27 @@ class TankDriveController:
                         )
                         self.current_path = []
 
+                    if not self.current_path:
+                        # find_path()가 예외 없이 그냥 빈 경로만 반환하는
+                        # 경우(시작점/목적지 자체는 안 막혔는데 그 사이 경로가
+                        # 없는 경우 -- 예: 방금 재분류된 오브젝트의 거대한
+                        # 안전 반경이 두 지점 사이를 완전히 갈라놓은 경우).
+                        # 이건 ValueError가 안 나서 위 except로도 안 걸리고,
+                        # 그대로 두면 다음 tick에 또 find_path()를 불러도
+                        # 똑같이 빈 경로만 나오는 게 무한 반복된다.
+                        # clear_start_area로 점점 넓혀가며 재시도하는
+                        # _find_path_with_recovery()로 한 번 더 시도한다.
+                        print(
+                            "D* Lite 후퇴->전진 복귀: find_path()가 빈 경로를 "
+                            "반환함(시작/목적지 자체는 안 막혔지만 그 사이 경로가 "
+                            "없는 상태) -> 비상 탈출 재시도"
+                        )
+                        self.current_path = (
+                            self.planner._find_path_with_recovery(
+                                current_position, self.dest,
+                            )
+                        )
+
             # 후퇴 경로 추종 중 쌓인 조향/속도 PID 오차가 새 전진 경로에
             # 그대로 이어지면 튀는 값이 나올 수 있어 초기화한다.
             self.speed_pid.reset()
@@ -944,9 +965,30 @@ class TankDriveController:
             if accumulated >= retreat_distance_m:
                 break
 
-        safe = [raw[0]]
+        # raw[0]은 현재 위치(지금 막혀 있는 지점) 그 자체다. 방금 생긴
+        # 패딩 반경이 breadcrumb 간격보다 넓으면(예: enemy_tank 안전
+        # 반경 49칸처럼 큰 경우), 바로 다음 breadcrumb 몇 개도 같이
+        # 덮여 있을 수 있다. _is_straight_line_walkable()은 시작점
+        # 바로 다음 지점부터 촘촘히 검사하는 함수라 그대로 쓰면 항상
+        # 실패하니, 실제로 다시 통행 가능한 첫 breadcrumb을 찾을 때까지
+        # 건너뛴 다음 거기서부터 정상적으로 구간별 검사를 이어간다.
+        first_free_idx = None
 
-        for p1, p2 in zip(raw, raw[1:]):
+        for idx in range(1, len(raw)):
+            grid = self.planner.world_to_grid(raw[idx], clamp=True)
+            if self.planner.is_free(grid):
+                first_free_idx = idx
+                break
+
+        if first_free_idx is None:
+            # breadcrumb 전체가 여전히 막혀 있다 -> 이 기록으로는 후퇴가
+            # 불가능하다 (retreat_distance_m을 늘리거나 상위 호출부의
+            # 비상 탈출(_find_path_with_recovery)에 맡겨야 한다).
+            return None
+
+        safe = [raw[0], raw[first_free_idx]]
+
+        for p1, p2 in zip(raw[first_free_idx:], raw[first_free_idx + 1:]):
             if not self.planner._is_straight_line_walkable(p1, p2):
                 break
 
@@ -2599,12 +2641,62 @@ class TankDriveController:
                         )
                     )
 
+                    if not self.current_path:
+                        # find_path()가 예외 없이 빈 경로만 반환한 경우
+                        # (시작점/목적지 자체는 안 막혔는데 그 사이에 경로가
+                        # 없는 상태 -- 예: 방금 재분류된 오브젝트의 거대한
+                        # 안전 반경이 두 지점 사이를 완전히 갈라놓은 경우).
+                        # 그대로 두면 다음 tick에도 똑같은 조건(경로 없음)이라
+                        # 다시 find_path()만 반복 호출하고 매번 빈 경로만
+                        # 나오는 게 무한 반복된다. clear_start_area로 점점
+                        # 넓혀가며 재시도하는 _find_path_with_recovery()로
+                        # 한 번 더 시도한다.
+                        print(
+                            "[/get_action] find_path()가 빈 경로를 반환함"
+                            "(시작/목적지 자체는 안 막혔지만 그 사이 경로가 "
+                            "없는 상태) -> 비상 탈출 재시도"
+                        )
+                        self.current_path = (
+                            self.planner._find_path_with_recovery(
+                                self.current_pos, self.dest,
+                            )
+                        )
+
         except ValueError as exc:
             print(
                 "D* Lite 경로 계산 실패:",
                 exc,
             )
             self.current_path = []
+
+            with self.planner_lock:
+                current_grid = self.planner.world_to_grid(
+                    self.current_pos, clamp=True,
+                )
+                standing_on_blocked_cell = not self.planner.is_free(
+                    current_grid,
+                )
+
+                if standing_on_blocked_cell:
+                    retreat_path = self._build_retreat_path()
+
+                    if retreat_path is not None:
+                        self.current_path = retreat_path
+                        self.vehicle_mode = 'retreat'
+                        print(
+                            f"[/get_action] 발밑이 막혀서 후퇴 경로로 전환합니다 ({len(retreat_path)}개 지점)."
+                        )
+                    else:
+                        self.current_path = (
+                            self.planner._find_path_with_recovery(
+                                self.current_pos, self.dest,
+                            )
+                        )
+                        self.vehicle_mode = 'advance'
+
+                    if self.current_path:
+                        self.speed_pid.reset()
+                        self.steering_pid.reset()
 
         if not self.current_path:
             self.speed_pid.reset()
