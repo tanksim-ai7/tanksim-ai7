@@ -571,44 +571,62 @@ class DStarPlanner:
 
     def compute_shortest_path(self, max_iterations=2_000_000):
         iteration = 0
-        while (
-            self._top_key() < self.calculate_key(self.start)
-            or not math.isclose(
-                self.get_rhs(self.start),
-                self.get_g(self.start),
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            )
-        ):
+
+        # [최적화] 캐싱 극대화
+        _abs = abs
+        _get_g = self.get_g
+        _get_rhs = self.get_rhs
+        _calculate_key = self.calculate_key
+        _top_key = self._top_key
+        _pop_open = self._pop_open
+        _insert_open = self._insert_open
+        _get_neighbors = self.get_neighbors
+        _update_vertex = self.update_vertex
+        _start = self.start
+        _inf = INF  
+
+        while True:
+            # ============================================================
+            # [삭제] if iteration % 200 == 0 파트의 타이머 코드를 완전히 제거했습니다.
+            # 이래야 백그라운드 스레드가 리셋/캔슬 버그 없이 경로를 끝까지 완벽하게 찾아옵니다.
+            # ============================================================
+            
+            g_start = _get_g(_start)
+            rhs_start = _get_rhs(_start)
+            if math.isfinite(g_start) and math.isfinite(rhs_start):
+                is_consistent = _abs(rhs_start - g_start) <= 1e-12
+            else:
+                # 만약 둘 다 무한대(INF)인 상태라면, D* Lite 이론상 일치(consistent)하는 
+                # 안정적인 상태로 판단하고 루프를 정상 탈출할 수 있도록 처리합니다.
+                is_consistent = (g_start == rhs_start)
+
+            if _top_key() >= _calculate_key(_start) and is_consistent:
+                break
+
             if iteration >= max_iterations:
                 raise RuntimeError("D* Lite 최대 반복 횟수를 초과했습니다.")
 
-            node, old_key = self._pop_open()
-
+            node, old_key = _pop_open()
             if node is None:
                 break
 
-            new_key = self.calculate_key(node)
+            new_key = _calculate_key(node)
 
             if old_key < new_key:
-                self._insert_open(node, new_key)
-
-            elif self.get_g(node) > self.get_rhs(node):
-                self.g[node] = self.get_rhs(node)
-
-                for predecessor in self.get_neighbors(node):
-                    self.update_vertex(predecessor)
-
+                _insert_open(node, new_key)
+            elif _get_g(node) > _get_rhs(node):
+                self.g[node] = _get_rhs(node)
+                for predecessor in _get_neighbors(node):
+                    _update_vertex(predecessor)
             else:
-                self.g[node] = INF
-                self.update_vertex(node)
-
-                for predecessor in self.get_neighbors(node):
-                    self.update_vertex(predecessor)
+                self.g[node] = _inf
+                _update_vertex(node)
+                for predecessor in _get_neighbors(node):
+                    _update_vertex(predecessor)
 
             iteration += 1
         
-        return self.get_g(self.start) < INF
+        return _get_g(_start) < _inf
 
     # --------------------------------------------------
     # 서버 호환 공개 메서드
