@@ -3,7 +3,8 @@ import os
 
 from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 from move.pid_controller import TankDriveController
-
+import requests
+import threading
 
 app = Flask(__name__)
 
@@ -17,7 +18,7 @@ ENEMY_DEST_IDX = 0
 
 tmp_flag = True
 
-@app.route('/init', methods=['GET'])
+@app.route('/init', methods=['POST'])
 def init():
     """episode 설정을 반환하고 TankDriveController 상태를 초기화한다."""
     # 기존 통합 서버의 simulator config를 유지한다.
@@ -43,7 +44,7 @@ def init():
 
     drive_controller.initialize(start_position=(59.0, 280.0))
 
-    return True
+    return jsonify({"status": "success"}), 200
 
 @app.route('/info', methods=['POST'])
 def info():
@@ -85,16 +86,14 @@ def get_action():
     data = request.get_json(force=True)
     rst_cmd = drive_controller.get_action(data)
     
-    try:
-        enemy_path = getattr(drive_controller.planner, "last_path", [])
-        
-        requests.post(
-            "http://127.0.0.0:5000/get_enemy_path",
-            json={"enemy_path": enemy_path},
-            timeout=0.05
-        )
-    except Exception as e:
-        pass
+    def send_path_background():
+        try:
+            enemy_path = getattr(drive_controller.planner, "last_path", [])
+            requests.post("http://127.0.0.0:5000/get_enemy_path", json={"enemy_path": enemy_path}, timeout=0.02)
+        except:
+            pass
+
+    threading.Thread(target=send_path_background, daemon=True).start()
     
     return jsonify(rst_cmd)
 

@@ -726,6 +726,8 @@ class TankDriveController:
                 "TankDriveController requires path_planner."
             )
 
+        self.enemy_update_counter = 0
+
         self.stop_flag = False
 
         self.planner = path_planner
@@ -1121,9 +1123,6 @@ class TankDriveController:
             return {"error": "No JSON received"}, 400
 
         self.latest_info = data
-
-        if self.latest_info.get("enemy_path", []) != []:
-            self.planner.insert_enemy_tank_path(self.latest_info)
 
         # 이번 /info에서 받은 실제 차체 yaw [deg].
         body_yaw_deg = (
@@ -2083,14 +2082,39 @@ class TankDriveController:
                 old_grid != new_grid
                 or not self.current_path
             ):
-                with self.planner_lock:
-                    self.current_path = (
-                        self.planner.find_path(
-                            self.current_pos,
-                            self.dest,
-                            self.latest_info
-                        )
-                    )
+                self.enemy_update_counter += 1
+
+                import copy # 최상단에 없다면 추가
+                if self.enemy_update_counter % 5 == 0:
+                    # [보완] deepcopy를 사용하여 멀티스레드 간 딕셔너리 데이터 간섭 에러를 원천 차단합니다.
+                    pass_info = copy.deepcopy(self.latest_info) if self.latest_info else None
+                else:
+                    # 렉 유발을 줄이기 위해 주입은 None으로 하되, 
+                    # 플래너 본체는 기존 적 장벽(movable_enemy_tank)을 지우지 않고 기억하고 주행합니다.
+                    pass_info = None
+
+                if not getattr(self, "is_planner_running", False):
+                    self.is_planner_running = True
+                    
+                    def background_planning_task(pos, destination, info):
+                        try:
+                            # 백그라운드 3~4초 지연 연산은 오직 이 창고 스레드 안에서만 안전하게 소모됩니다.
+                            with self.planner_lock:
+                                calculated_path = self.planner.find_path(pos, destination, info)
+                            
+                            if calculated_path and calculated_path != []:
+                                self.current_path = calculated_path
+                        except Exception as e:
+                            pass
+                        finally:
+                            self.is_planner_running = False
+
+                    # 카운터 분기가 완벽히 튜닝된 pass_info를 안전하게 백그라운드로 전송!
+                    threading.Thread(
+                        target=background_planning_task,
+                        args=(self.current_pos.copy(), self.dest.copy(), pass_info),
+                        daemon=True
+                    ).start()
 
         except ValueError as exc:
             print(

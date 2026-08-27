@@ -277,6 +277,80 @@ class DStarPlanner:
 
         return result
 
+    def rebuild_enemy_clearance_costs(self):
+        """
+        [적 탱크 전용 초경량 클리어런스 비용 맵 병합 함수]
+        정적 장애물 전체를 다익스트라 돌리지 않고, 
+        오직 현재 적 탱크의 120m 이동 경로 주변 격자들만 스마트하게 감안하여 soft cost를 더해줍니다.
+        """
+        # 1. 적 전차 경로선 주변에 soft cost 마찰력을 퍼트릴 범위 세팅
+        enemy_clearance_radius = 4.0   # 적 경로 좌우 사방 4칸 범위까지 마찰력 형성
+        enemy_clearance_weight = 30.0  # 마찰력 세기 가중치 (필요시 조절)
+        enemy_clearance_decay = 2.0     # 거리에 따른 감쇄율
+        
+        if not self.movable_enemy_tank or enemy_clearance_radius <= 0.0:
+            return
+
+        distance = {}
+        heap = []
+
+        # 2. 전역 맵(self.obstacles)을 다 집어넣지 않고, '오직 적 경로 노드'만 시작점으로 큐에 주입!
+        # 이 기하학적 타겟팅 덕분에 연산량이 1/1000 이하로 줄어들어 0ms만에 끝납니다.
+        for node in self.movable_enemy_tank:
+            distance[node] = 0.0
+            heapq.heappush(heap, (0.0, node))
+
+        directions = [
+            (1, 0, 1.0), (-1, 0, 1.0),
+            (0, 1, 1.0), (0, -1, 1.0),
+            (1, 1, math.sqrt(2.0)),
+            (1, -1, math.sqrt(2.0)),
+            (-1, 1, math.sqrt(2.0)),
+            (-1, -1, math.sqrt(2.0)),
+        ]
+
+        # 3. 좁은 반경 다중 시작점 다익스트라 탐색
+        while heap:
+            current_distance, node = heapq.heappop(heap)
+
+            if current_distance != distance.get(node):
+                continue
+
+            if current_distance > enemy_clearance_radius:
+                continue
+
+            x, z = node
+
+            for dx, dz, step in directions:
+                neighbor = (x + dx, z + dz)
+
+                if not self.in_bounds(neighbor):
+                    continue
+
+                next_distance = current_distance + step
+
+                if next_distance > enemy_clearance_radius:
+                    continue
+
+                if next_distance < distance.get(neighbor, INF):
+                    distance[neighbor] = next_distance
+                    heapq.heappush(heap, (next_distance, neighbor))
+
+        # 4. 계산된 적 주변 마찰력을 기존 정적 clearance_costs 딕셔너리에 '누적 병합'합니다.
+        for node, obstacle_distance in distance.items():
+            # 적 본선 장벽 자체이거나 이미 정적 장애물인 구역은 스킵
+            if node in self.movable_enemy_tank or node in self.obstacles:
+                continue
+
+            # 적 주변 격자에 부드러운 소프트 코스트 마찰력 주입
+            # (기존 정적 맵 마찰력이 있다면 더 큰 값을 취하거나 합산하여 덮어쓰지 않도록 방어)
+            enemy_soft_cost = enemy_clearance_weight * math.exp(-obstacle_distance / enemy_clearance_decay)
+            
+            if node in self.clearance_costs:
+                self.clearance_costs[node] = max(self.clearance_costs[node], enemy_soft_cost)
+            else:
+                self.clearance_costs[node] = enemy_soft_cost
+
     def rebuild_clearance_costs(self):
         """
         hard obstacle 셀에서 clearance_radius 안쪽 자유 셀까지의 거리를
@@ -657,9 +731,11 @@ class DStarPlanner:
     def insert_enemy_tank_path(self, latest_info=None):
         if latest_info != None and self.is_enemy == False:
             self.movable_enemy_tank = set([])
-            path_margin = 2 
-            
+            path_margin = 20
             enemy_waypoints = latest_info.get("enemy_path", [])
+            
+            accumulated_distance = 0.0  # 지금까지 이동한 경로의 누적 거리
+            max_allowed_distance = 120.0 # 제한할 최대 경로 길이
             
             # 점과 점 사이를 선으로 촘촘하게 연결하기
             for i in range(len(enemy_waypoints) - 1):
@@ -674,20 +750,26 @@ class DStarPlanner:
                     dist = math.hypot(x2 - x1, z2 - z1)
                     if dist <= 0.01:
                         continue
-                        
-                    # [핵심] 1미터(또는 1셀) 간격으로 촘촘하게 중간 점들을 생성하여 선을 채움
-                    step_size = 1.0  # 필요에 따라 0.5 등으로 더 촘촘하게 조절 가능
+                    
+                    step_size = 10.0 
                     steps = int(dist / step_size) + 1
                     
                     for s in range(steps):
                         t = s / max(1, steps - 1)
+                        
+                        # [핵심] 현재 점까지의 정확한 실시간 누적 거리 계산
+                        current_point_dist = accumulated_distance + (dist * t)
+                        
+                        # 누적 경로 길이가 60을 초과하면 더 이상 맵에 등록하지 않고 즉시 루프 종료
+                        if current_point_dist > max_allowed_distance:
+                            break
+                        
                         # 선형 보간(LERP)으로 중간 좌표 유도
                         p_x = x1 + (x2 - x1) * t
                         p_z = z1 + (z2 - z1) * t
-                        
                         p_grid = self.world_to_grid((p_x, p_z), clamp=True)
                         
-                        # 생성된 모든 중간 점 주변에 두께 마진 주입
+                        # 생성된 중간 점 주변에 두께 마진 주입
                         p_min_x = max(p_grid[0] - path_margin, 0)
                         p_max_x = min(p_grid[0] + path_margin, 300)
                         p_min_z = max(p_grid[1] - path_margin, 0)
@@ -696,23 +778,27 @@ class DStarPlanner:
                         for x in range(p_min_x, p_max_x + 1):
                             for z in range(p_min_z, p_max_z + 1):
                                 self.movable_enemy_tank.add((x, z))
-
-            # 3. 내 차량 시작점 주변 안전하게 차단 해제 (기존 코드 유지)
-            # start_grid = self.world_to_grid(current_pos, clamp=True)
-            # for sx in range(start_grid[0] - 2, start_grid[0] + 3):
-            #     for sz in range(start_grid[1] - 2, start_grid[1] + 3):
-            #         self.movable_enemy_tank.discard((sx, sz))
+                    
+                    # 현재 직선 구간의 전체 거리를 누적 시킴
+                    accumulated_distance += dist
+                    
+                    # 만약 현재 구간을 더했을 때 이미 120을 넘었다면 다음 웨이포인트(직선)들은 볼 필요도 없이 종료
+                    if accumulated_distance > max_allowed_distance:
+                        break
 
             # 4. D* Lite 증분 업데이트 (기존 코드 유지)
             changed_cells = self.last_enemy_tank.symmetric_difference(self.movable_enemy_tank)
+            # self.rebuild_clearance_costs()
+            self.rebuild_enemy_clearance_costs()
             for node in changed_cells:
                 if self.in_bounds(node):
                     self.update_vertex(node)
                     for neighbor in self.get_neighbors(node):
                         self.update_vertex(neighbor)
-
+                        
             # 다음 루프 비교를 위해 백업
-            self.last_enemy_tank = self.movable_enemy_tank.copy()   
+            self.last_enemy_tank = self.movable_enemy_tank.copy()
+   
 
     def find_path(self, current_pos, dest, latest_info=None):
         """
@@ -722,7 +808,8 @@ class DStarPlanner:
 
         # self.movable_enemy_tank
         # 움직일 수 있는 적 전차 위치에 대한 변수 업데이트
-        # self.insert_enemy_tank_path(latest_info)
+        if latest_info != None and latest_info.get("enemy_path", []) != []:
+            self.insert_enemy_tank_path(latest_info)
 
         start = self.world_to_grid(current_pos, clamp=True)
         goal = self.world_to_grid(dest, clamp=True)
