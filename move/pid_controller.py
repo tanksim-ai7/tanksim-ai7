@@ -667,7 +667,7 @@ class TankDriveController:
     # --------------------------------------------------------
 
     # 직선 기준 최고 목표속도 [km/h].
-    MAX_SPEED_KMH = 60.0
+    MAX_SPEED_KMH = 40.0
 
     # 목적지/코너 제동거리 계산에서 가정하는 계획 감속도 [m/s^2].
     PLANNED_BRAKE_DECEL_MPS2 = 1.5
