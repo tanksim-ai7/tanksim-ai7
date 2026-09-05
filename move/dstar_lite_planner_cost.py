@@ -866,7 +866,23 @@ class DStarPlanner:
         if not self.is_free(goal):
             raise ValueError(f"목적지 {goal}가 장애물에 포함됩니다.")
 
-        if goal != self.goal:
+        # move_start()는 기존에 이미 탐색해 둔 g/rhs 값을 그대로 재사용하는
+        # "증분" 갱신이라, 시작점이 그 탐색 그래프 범위 안에서 조금씩만
+        # 움직일 때만 정확하다. 후퇴처럼 시작점이 한 번에 크게 점프하면
+        # (예: 이전 탐색이 한 번도 들어가 본 적 없는 영역으로 이동) 그
+        # 영역의 g값이 전부 미탐색(INF) 상태라, 실제로는 장애물을 피해갈
+        # 경로가 있어도 move_start()만으로는 "경로 없음"으로 잘못
+        # 판단한다. 그래서 점프 거리가 비정상적으로 크면 move_start()
+        # 대신 _reset_search()로 완전히 새로 탐색한다.
+        RESET_JUMP_THRESHOLD_CELLS = 15.0
+
+        needs_full_reset = (
+            goal != self.goal
+            or self.start is None
+            or self.heuristic(self.start, start) > RESET_JUMP_THRESHOLD_CELLS
+        )
+
+        if needs_full_reset:
             self._reset_search(start, goal)
         else:
             self.move_start(start)
@@ -985,9 +1001,15 @@ class DStarPlanner:
         goal_blocked = not self.is_free(goal_grid)
 
         if not (start_blocked or goal_blocked):
-            # 둘 다 멀쩡한데 경로가 없다 -> clear_start_area로 고칠 수 있는
-            # 문제가 아니라 진짜로 단절된 지형이다. 반경을 키워봐야 소용없다.
-            return []
+            # 둘 다 멀쩡한데 경로가 없다 -> 시작/목적지 셀 자체는 안 막혔어도
+            # 바로 옆 셀들이 (예: 방금 지나온/탐지된 오브젝트의 패딩 반경)
+            # 통로를 막고 있을 수 있다. 이는 clear_start_area(radius=2)를
+            # 무조건 호출하는 apply_destination()(수동 /set_destination)이
+            # 성공적으로 경로를 다시 찾아내는 것과 동일한 상황이므로,
+            # 여기서도 완전히 단절된 지형으로 단정하지 않고 아래와 동일한
+            # 반경 확장 clear_start_area 재시도를 그대로 태운다.
+            start_blocked = True
+            goal_blocked = True
 
         for radius in range(1, max_radius + 1):
             if start_blocked:
