@@ -929,6 +929,11 @@ class TankDriveController:
             self.speed_pid.reset()
             self.steering_pid.reset()
 
+            # 후퇴->전진 복귀로 새로 짠 경로를 그래프 이미지에도 반영한다.
+            # (여기서 안 부르면 /update_obstacle 때 그린 낡은 그래프가
+            # 그대로 남아 실제 주행 경로와 어긋나 보인다.)
+            self.render_map("D* Lite Retreat Recovery")
+
     def _build_retreat_path(
         self,
         retreat_distance_m: Optional[float] = None,
