@@ -493,7 +493,44 @@ def make_stop_command() -> Dict[str, Any]:
     }
 
 
-def make_longitudinal_command(pid_output: float) -> Dict[str, Any]:
+# def make_longitudinal_command(pid_output: float) -> Dict[str, Any]:
+#     """
+#     속도 PID 출력을 W/S 명령으로 변환한다.
+
+#     Args:
+#         pid_output:
+#             -1 ~ +1 범위의 속도 PID 출력.
+#             양수는 W 전진 가속, 음수는 S 제동/후진 방향 입력.
+
+#     Returns:
+#         moveWS가 채워진 command dictionary.
+#     """
+#     # PID 출력이 아주 작을 때 W/S가 반복 전환되는 것을 막는 명령 deadband.
+#     deadband = 0.02
+
+#     if pid_output > deadband:
+#         ws_command = "W"
+#         ws_weight = clamp(pid_output, 0.0, 1.0)
+
+#     elif pid_output < -deadband:
+#         ws_command = "S"
+#         ws_weight = clamp(abs(pid_output), 0.0, 1.0)
+
+#     else:
+#         ws_command = ""
+#         ws_weight = 0.0
+
+#     return {
+#         "moveWS": {
+#             "command": ws_command,
+#             "weight": round(ws_weight, 4),
+#         },
+#         "moveAD": {"command": "", "weight": 0.0},
+#         "turretQE": {"command": "", "weight": 0.0},
+#         "turretRF": {"command": "", "weight": 0.0},
+#         "fire": False,
+#     }
+def make_longitudinal_command(pid_output: float, signed_speed_kmh: Optional[float] = None) -> Dict[str, Any]:
     """
     속도 PID 출력을 W/S 명령으로 변환한다.
 
@@ -507,19 +544,31 @@ def make_longitudinal_command(pid_output: float) -> Dict[str, Any]:
     """
     # PID 출력이 아주 작을 때 W/S가 반복 전환되는 것을 막는 명령 deadband.
     deadband = 0.02
+    STOP_SPEED_KMH = 1.0
 
     if pid_output > deadband:
         ws_command = "W"
         ws_weight = clamp(pid_output, 0.0, 1.0)
 
     elif pid_output < -deadband:
-        ws_command = "S"
-        ws_weight = clamp(abs(pid_output), 0.0, 1.0)
 
+        # signed speed를 아직 계산하지 못한 초기 상태
+        if signed_speed_kmh is None:
+            ws_command = ""
+            ws_weight = 0.0
+
+        # 아직 전진 중이면 S를 제동으로 사용
+        elif signed_speed_kmh > STOP_SPEED_KMH:
+            ws_command = "S"
+            ws_weight = clamp(abs(pid_output), 0.0, 1.0)
+
+        # 정지 근처 또는 이미 후진하기 시작했으면 S 차단
+        else:
+            ws_command = ""
+            ws_weight = 0.0
     else:
-        ws_command = ""
-        ws_weight = 0.0
-
+            ws_command = ""
+            ws_weight = 0.0
     return {
         "moveWS": {
             "command": ws_command,
@@ -702,6 +751,8 @@ class TankDriveController:
     # /info 위치 기반 속도 fallback의 EMA 신규 측정값 비율.
     INFO_SPEED_EMA_ALPHA = 0.35
 
+    ALIGNMENT_HOLD_ANGLE_DEG = 35.0
+
     def __init__(
         self,
         path_planner: DStarLitePlanner,
@@ -750,6 +801,8 @@ class TankDriveController:
 
         # /info에서 계산/필터링한 현재 속도 [km/h].
         self.info_speed_kmh: Optional[float] = None
+
+        self.info_signed_speed_kmh : Optional[float] = None
 
         # 위치 기반 속도 fallback 계산에 사용하는 직전 차량 위치 [x, z] [m].
         self.info_previous_position: Optional[List[float]] = None
@@ -1309,6 +1362,7 @@ class TankDriveController:
         /info 기반 속도 필터 상태를 초기화한다.
         """
         self.info_speed_kmh = None
+        self.info_signed_speed_kmh = None
         self.info_previous_position = None
         self.info_previous_time = None
 
@@ -1324,71 +1378,157 @@ class TankDriveController:
     # --------------------------------------------------------
 
     def _update_info_speed(
-        self,
-        data: Dict[str, Any],
-        player_position: Sequence[float],
-    ) -> Tuple[Optional[float], Optional[str]]:
-        """
-        /info에서 현재 속도를 갱신한다.
+    self,
+    data: Dict[str, Any],
+    player_position: Sequence[float],
+    body_yaw_deg: Optional[float],
+) -> Tuple[Optional[float], Optional[str]]:
+    # """
+    # /info에서 현재 속력과 전진/후진 방향을 함께 갱신한다.
 
-        우선순위:
-            1. playerSpeed 등 명시적 속도 필드.
-            2. 없으면 연속 위치 변화량 / dt.
+    # Args:
+    #     data:
+    #         simulator의 최신 /info JSON.
 
-        Args:
-            data:
-                /info JSON.
-            player_position:
-                현재 차량 [x, z] 위치 [m].
+    #     player_position:
+    #         현재 차량 위치 [x, z] [m].
 
-        Returns:
-            (필터링된 속도 [km/h], 측정 source 문자열)
-        """
+    #     body_yaw_deg:
+    #         현재 차체의 월드 yaw [deg].
+    #         차체 정면 방향과 실제 이동 방향을 비교해
+    #         전진/후진 여부를 판별하는 데 사용한다.
+
+    # Returns:
+    #     Tuple[Optional[float], Optional[str]]
+
+    #     첫 번째 값:
+    #         EMA가 적용된 현재 속력 [km/h].
+    #         방향과 무관한 양수 값이다.
+
+    #     두 번째 값:
+    #         속도 측정 source 문자열.
+    #         현재 방식에서는 위치 변화량 기반이면 "playerPos/dt".
+
+    # Notes:
+    #     self.info_signed_speed_kmh에는 별도로
+    #     전진이면 양수, 후진이면 음수 속도를 저장한다.
+    # """
+
+    # 현재 /info 처리 시간 [s, monotonic].
+    # 연속 위치 사이의 dt 계산에 사용한다.
+    
         now = time.monotonic()
 
-        explicit_speed_kmh, speed_key = extract_speed_from_info(data)
+        # 이번 /info에서 계산한 실제 속력 [km/h].
+        # 아직 연속 위치 정보가 없으면 None이다.
+        measured_speed_kmh = None
 
-        measured_speed_kmh = explicit_speed_kmh
-        speed_source = speed_key
+        # 이번 속력의 계산 방식 설명 문자열.
+        speed_source = None
 
+        # 직전 위치와 시간이 모두 있어야 위치 변화 기반 속도를 계산할 수 있다.
         if (
-            measured_speed_kmh is None
-            and self.info_previous_position is not None
+            self.info_previous_position is not None
             and self.info_previous_time is not None
         ):
+            # 직전 /info와 현재 /info 사이 시간차 [s].
             dt = now - self.info_previous_time
 
+            # 너무 짧거나 오래된 간격은 속도 계산에서 제외한다.
             if 0.01 <= dt <= 1.0:
+
+                # 월드 X축 방향 실제 이동량 [m].
                 dx = (
                     float(player_position[0])
                     - float(self.info_previous_position[0])
                 )
 
+                # 월드 Z축 방향 실제 이동량 [m].
                 dz = (
                     float(player_position[1])
                     - float(self.info_previous_position[1])
                 )
 
-                measured_speed_kmh = (
-                    math.hypot(dx, dz)
-                    / dt
-                    * 3.6
-                )
+                # 이동 거리 [m].
+                # 방향은 제거하고 속력의 크기만 계산한다.
+                distance_m = math.hypot(dx, dz)
 
+                # 위치 변화량으로 계산한 실제 속력 [m/s].
+                speed_mps = distance_m / dt
+
+                # PID가 사용하는 단위로 변환한 실제 속력 [km/h].
+                measured_speed_kmh = speed_mps * 3.6
+
+                # 현재 측정값의 source.
                 speed_source = "playerPos/dt"
 
+                # -------------------------------------------------
+                # 전진 / 후진 방향 판별
+                # -------------------------------------------------
+                if body_yaw_deg is not None:
+
+                    # 현재 차체 yaw를 삼각함수 계산용 radian으로 변환한다.
+                    yaw_rad = math.radians(body_yaw_deg)
+
+                    # 차체 정면 단위벡터:
+                    #
+                    #     forward_x = sin(yaw)
+                    #     forward_z = cos(yaw)
+                    #
+                    # 실제 이동 벡터 (dx, dz)와 내적해
+                    # 이동 방향이 차체 정면인지 후면인지 판별한다.
+                    forward_dot = (
+                        math.sin(yaw_rad) * dx
+                        + math.cos(yaw_rad) * dz
+                    )
+
+                    # 내적이 0 이상이면 전진,
+                    # 0 미만이면 차체 정면의 반대 방향으로 이동하므로 후진이다.
+                    direction_sign = (
+                        1.0
+                        if forward_dot >= 0.0
+                        else -1.0
+                    )
+
+                    # 부호 있는 실제 속도 [km/h].
+                    #
+                    # 예:
+                    #     전진 8 km/h  -> +8
+                    #     후진 3 km/h  -> -3
+                    self.info_signed_speed_kmh = (
+                        measured_speed_kmh
+                        * direction_sign
+                    )
+
+                else:
+                    # 차체 yaw를 아직 받지 못하면 이동 방향을 판별할 수 없으므로
+                    # 일시적으로 양수 속도로 저장한다.
+                    self.info_signed_speed_kmh = (
+                        measured_speed_kmh
+                    )
+
+        # 다음 /info에서 위치 변화량을 계산하기 위해
+        # 현재 위치를 직전 위치로 저장한다.
         self.info_previous_position = [
             float(player_position[0]),
             float(player_position[1]),
         ]
 
+        # 다음 /info에서 dt를 계산하기 위해 현재 시간을 저장한다.
         self.info_previous_time = now
 
+        # 이번에 정상적인 위치 기반 속력을 계산했을 때만
+        # 기존 EMA 필터 상태를 갱신한다.
         if measured_speed_kmh is not None:
+
+            # 첫 유효 측정값은 그대로 초기값으로 사용한다.
             if self.info_speed_kmh is None:
-                self.info_speed_kmh = measured_speed_kmh
+                self.info_speed_kmh = (
+                    measured_speed_kmh
+                )
 
             else:
+                # 속력 노이즈를 줄이기 위한 기존 EMA 필터.
                 self.info_speed_kmh = (
                     self.INFO_SPEED_EMA_ALPHA
                     * measured_speed_kmh
@@ -1399,7 +1539,10 @@ class TankDriveController:
                     * self.info_speed_kmh
                 )
 
-        return self.info_speed_kmh, speed_source
+        return (
+            self.info_speed_kmh,
+            speed_source,
+        )
 
     def _read_player_body_yaw_deg(self) -> Optional[float]:
         """
@@ -1642,6 +1785,7 @@ class TankDriveController:
             speed_kmh, speed_source = self._update_info_speed(
                 data,
                 self.current_pos,
+                body_yaw_deg
             )
         else:
             speed_kmh = self.info_speed_kmh
@@ -1657,6 +1801,10 @@ class TankDriveController:
             f"(source={speed_source})",
         )
         print("[/info] 설정 목적지:", self.dest)
+        print(
+        "[/info] signed speed:",
+        self.info_signed_speed_kmh,
+        )
 
         return {
             "status": "success",
@@ -2817,7 +2965,8 @@ class TankDriveController:
 
                 command = (
                     make_longitudinal_command(
-                        final_pid_output
+                        final_pid_output,
+                        self.info_signed_speed_kmh
                     )
                 )
 
@@ -2904,6 +3053,9 @@ class TankDriveController:
             alignment_speed_limit_kmh,
             self.MAX_SPEED_KMH,
         )
+        if abs(heading_error_deg) >= self.ALIGNMENT_HOLD_ANGLE_DEG:
+            target_speed_kmh = 0.0
+
 
         speed_error_kmh = (
             target_speed_kmh
@@ -2929,7 +3081,8 @@ class TankDriveController:
 
             command = (
                 make_longitudinal_command(
-                    braking_pid_output
+                    braking_pid_output,
+                    self.info_signed_speed_kmh
                 )
             )
 
@@ -2938,7 +3091,8 @@ class TankDriveController:
         else:
             command = (
                 make_longitudinal_command(
-                    pid_output
+                    pid_output,
+                    self.info_signed_speed_kmh
                 )
             )
 
