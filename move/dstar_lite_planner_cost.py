@@ -125,6 +125,12 @@ class DStarPlanner:
         self.obstacle_rectangles: List[ObstacleRect] = []
         self.obstacles: Set[GridNode] = set(obstacles or [])
 
+        # _find_path_with_recovery()가 마지막으로 반환한 경로가, 정상
+        # 경로가 아니라 "적 방어 패딩만 걸린 구간"을 억지로 뚫고 지나가는
+        # 최후 수단 경로였는지 여부. 호출부(get_action 등)가 이걸 보고
+        # 저속 통과 등 안전 조치를 취할 수 있게 노출해 둔다.
+        self.last_path_is_risky_detour: bool = False
+
         # 움직일 수 있는 적 전차에 대한 변수
         self.movable_enemy_tank: Set[GridNode] = set([])
 
@@ -976,17 +982,123 @@ class DStarPlanner:
 
         return changed_obstacles | changed_terrain
 
-    def _find_path_with_recovery(self, current_pos, dest, max_radius=6):
+    # 기본 비상 탈출 반경 [칸]. 예전 6칸은 시작점/목적지 "바로 옆"만
+    # 막힌 좁은 상황만 커버했다 — enemy_tank 방어 패딩(±49칸)처럼 통로
+    # 자체가 넓게 끊긴 경우는 이 반경을 아무리 키워도 못 뚫는다(패딩
+    # 중심이 시작점/목적지가 아니라 그 "사이"에 있기 때문). 그래도 저
+    # 비용으로 커버되는 케이스가 늘어나니 기본값 자체는 넉넉하게 키운다.
+    DEFAULT_RECOVERY_RADIUS = 15
+
+    def _compute_core_only_obstacles(self) -> Set[GridNode]:
         """
-        find_path()를 시도하고, 실패하면 clear_start_area()로 점점 더
-        넓게 뚫어가며 재시도한다. 매 반경 단계마다 실제로 find_path()를
-        다시 돌려서 "진짜로 경로가 나오는지"를 직접 확인한다 — is_free()
-        판정만으로는 큰 장애물 덩어리 안의 작은 섬에 갇힌 경우를 놓칠
-        수 있기 때문이다 (clear_start_area 참고).
+        set_obstacles()가 만드는 self.obstacles 중에서, "방어 패딩"
+        확장분(enemy/enemy_tank 타입의 ±25 / ±49칸 가시성 기반 확장)을
+        빼고, 각 오브젝트의 실제 바운딩 박스 + obstacle_margin만 남긴
+        버전을 새로 계산해서 반환한다.
+
+        원본 self.obstacles/타입별 확장 로직은 건드리지 않는다 — 이건
+        "탐침(probe)"용으로 임시 대체할 셀 집합을 새로 만드는 것뿐이다.
+        """
+        core_obstacles: Set[GridNode] = set()
+
+        for obs in self.obstacle_rectangles:
+            x_min = max(0, math.floor(obs.x_min - self.obstacle_margin))
+            x_max = min(self.width - 1, math.ceil(obs.x_max + self.obstacle_margin))
+            z_min = max(0, math.floor(obs.z_min - self.obstacle_margin))
+            z_max = min(self.height - 1, math.ceil(obs.z_max + self.obstacle_margin))
+
+            for x in range(x_min, x_max + 1):
+                for z in range(z_min, z_max + 1):
+                    core_obstacles.add((x, z))
+
+        return core_obstacles
+
+    def _find_path_ignoring_defensive_padding(self, current_pos, dest):
+        """
+        "국소 비상 탈출(clear_start_area 반경 확장)"로도 경로가 안
+        나올 때 쓰는 최후 수단.
+
+        clear_start_area()는 시작점/목적지 '근처'만 뚫어주기 때문에,
+        enemy_tank 방어 패딩처럼 통로 중간이 넓게(최대 ±49칸) 끊긴
+        경우는 반경을 아무리 키워도 못 뚫는다. 이 함수는 그 방어
+        패딩 확장분만 제거한 상태로 딱 한 번 전체 재탐색을 시도해서,
+        "패딩만 없으면 실제로 지나갈 수 있는 길인지"를 확인한다.
+
+        주의:
+            이 경로는 실제 위협(적 전차 등)의 패딩 구역을 그대로
+            통과할 수 있다는 뜻이다. 절대 기본 경로로 쓰면 안 되고,
+            _find_path_with_recovery()가 다른 모든 수단을 다 써보고도
+            실패했을 때만, 그리고 호출부가 이 사실(risky)을 인지하고
+            저속 통과 등 별도 안전조치를 취한다는 전제 하에만 써야
+            한다.
+
+        Returns
+        -------
+        list[WorldPoint]
+            찾은 경로. 못 찾으면 빈 리스트.
+        """
+        original_obstacles = self.obstacles
+        original_start = self.start
+        original_goal = self.goal
+
+        try:
+            self.obstacles = self._compute_core_only_obstacles()
+
+            start_grid = self.world_to_grid(current_pos, clamp=True)
+            goal_grid = self.world_to_grid(dest, clamp=True)
+
+            if not self.is_free(start_grid) or not self.is_free(goal_grid):
+                # 방어 패딩을 다 걷어냈는데도 시작/목적지 자체가 막혀
+                # 있다면(실제 지형/하드 장애물 위에 서 있는 등) 이 기법
+                # 으로는 답이 없다.
+                return []
+
+            self._reset_search(start_grid, goal_grid)
+
+            if not self.compute_shortest_path():
+                return []
+
+            grid_path = self._extract_grid_path()
+            world_path = [self.grid_to_world(node) for node in grid_path]
+            return self.ultimate_one_pass_compression(world_path)
+        finally:
+            # 탐침용으로 바꿨던 obstacles를 반드시 원상 복구하고,
+            # 그 상태 기준으로 검색 그래프도 다시 리셋해 둔다 — 이후
+            # 정상 find_path() 호출이 오염된 g/rhs를 이어받지 않도록.
+            self.obstacles = original_obstacles
+            self._reset_search(original_start, original_goal)
+
+    def _find_path_with_recovery(self, current_pos, dest, max_radius=None):
+        """
+        find_path()를 시도하고, 실패하면 아래 3단계를 순서대로 시도한다.
+
+        1) clear_start_area()로 시작점/목적지 주변 반경을 점점 넓혀가며
+           재시도 (기존 방식). 매 반경 단계마다 실제로 find_path()를
+           다시 돌려서 "진짜로 경로가 나오는지"를 직접 확인한다 —
+           is_free() 판정만으로는 큰 장애물 덩어리 안의 작은 섬에 갇힌
+           경우를 놓칠 수 있기 때문이다 (clear_start_area 참고).
+
+        2) 그래도 안 되면, 혹시 증분 탐색(move_start) 쪽 그래프 상태가
+           낡아서 실제로 존재하는 우회로를 못 찾고 있는 건 아닌지 확인
+           하기 위해 완전히 처음부터(_reset_search) 한 번 더 전체
+           재탐색한다. (증분 갱신은 대부분 맞지만, 만약을 대비한 안전
+           장치)
+
+        3) 그래도 안 되면 최후 수단으로, enemy/enemy_tank 방어 패딩
+           확장분만 제거한 상태로 다시 탐색해본다
+           (_find_path_ignoring_defensive_padding). 이건 실제 위협의
+           안전거리를 무시하고 지나가는 경로라 self.last_path_is_risky_detour
+           를 True로 표시해서 반환한다 — 호출부가 반드시 이 플래그를
+           확인해서 저속 통과 등 조치를 해야 한다.
 
         시작점/목적지 어느 쪽이 막혀 있는지 모두 확인해서 필요한 쪽을
         같이 뚫는다.
         """
+        if max_radius is None:
+            max_radius = self.DEFAULT_RECOVERY_RADIUS
+
+        self.last_path_is_risky_detour = False
+
         try:
             path = self.find_path(current_pos, dest)
         except ValueError:
@@ -1011,6 +1123,7 @@ class DStarPlanner:
             start_blocked = True
             goal_blocked = True
 
+        # 1단계: 반경을 넓혀가며 국소 비상 해제.
         for radius in range(1, max_radius + 1):
             if start_blocked:
                 self.clear_start_area(current_pos, radius=radius)
@@ -1029,7 +1142,47 @@ class DStarPlanner:
         print(
             f"⚠️ _find_path_with_recovery: 반경 {max_radius}칸까지 비상 해제해봤지만 "
             f"{start_grid} -> {goal_grid} 경로를 찾지 못했습니다. "
-            "장애물이 반경보다 넓게 퍼져 있거나 진짜로 단절된 지역일 수 있습니다."
+            "국소 반경으로는 못 뚫는, 통로 자체가 넓게 끊긴 상황일 수 있습니다. "
+            "전체 재탐색으로 넘어갑니다."
+        )
+
+        # 2단계: 혹시 모를 증분 탐색 그래프 노후화에 대비해 완전 재탐색.
+        try:
+            self._reset_search(start_grid, goal_grid)
+            if self.compute_shortest_path():
+                grid_path = self._extract_grid_path()
+                world_path = [self.grid_to_world(node) for node in grid_path]
+                path = self.ultimate_one_pass_compression(world_path)
+        except ValueError:
+            path = []
+
+        if path:
+            print("✅ _find_path_with_recovery: 전체 재탐색으로 경로를 찾았습니다.")
+            self.last_path = path
+            return path
+
+        print(
+            "⚠️ _find_path_with_recovery: 전체 재탐색으로도 경로를 찾지 못했습니다. "
+            "방어 패딩(enemy/enemy_tank)을 무시한 최후 수단 우회 탐색을 시도합니다."
+        )
+
+        # 3단계: 방어 패딩만 무시한 최후 수단 우회 탐색.
+        path = self._find_path_ignoring_defensive_padding(current_pos, dest)
+
+        if path:
+            self.last_path_is_risky_detour = True
+            print(
+                "🚨 _find_path_with_recovery: 방어 패딩을 무시한 우회 경로를 찾았습니다 "
+                "(실제 위협 근접 구간을 지나갈 수 있음 — 호출부에서 저속 통과 등 "
+                "안전조치 필요, last_path_is_risky_detour=True)."
+            )
+            self.last_path = path
+            return path
+
+        print(
+            f"❌ _find_path_with_recovery: 모든 수단을 다 써봤지만 "
+            f"{start_grid} -> {goal_grid} 경로를 찾지 못했습니다. "
+            "장애물이 실제 하드 장애물만으로도 완전히 단절된 지역일 수 있습니다."
         )
         return []
 

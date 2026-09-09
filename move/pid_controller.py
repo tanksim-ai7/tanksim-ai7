@@ -485,7 +485,7 @@ def make_stop_command() -> Dict[str, Any]:
         Flask 서버가 그대로 jsonify할 수 있는 command dictionary.
     """
     return {
-        "moveWS": {"command": "", "weight": 0.0},
+        "moveWS": {"command": "STOP", "weight": 1.0},
         "moveAD": {"command": "", "weight": 0.0},
         "turretQE": {"command": "", "weight": 0.0},
         "turretRF": {"command": "", "weight": 0.0},
@@ -751,6 +751,36 @@ class TankDriveController:
     # /info 위치 기반 속도 fallback의 EMA 신규 측정값 비율.
     INFO_SPEED_EMA_ALPHA = 0.35
 
+    # --------------------------------------------------------
+    # 후퇴 중 제자리 회전(피벗턴) 파라미터
+    # --------------------------------------------------------
+    # 브레이크(moveWS)와 조향(moveAD)을 동시에 최대로 걸면, 속도가
+    # 남아있는 동안 넓은 반경으로 도는 원호가 나온다. 탱크(궤도차량)는
+    # moveWS 없이 moveAD만으로 제자리 선회가 가능하므로, 후퇴 중
+    # heading_error가 크면 "먼저 확실히 감속 -> 그 다음 제자리 회전"
+    # 순서로 나눠서 처리한다.
+
+    # 이 각도[deg] 이상 벌어지면 제자리 회전이 필요하다고 판단한다.
+    PIVOT_ENTER_HEADING_ERROR_DEG = 90.0
+
+    # 제자리 회전 중 이 각도[deg] 이하로 좁혀지면 회전을 끝내고
+    # 정상 D* Lite 추종(전진+조향)으로 복귀한다.
+    # ENTER보다 작게 둬서 히스테리시스를 만든다 (경계값 근처에서
+    # 회전 시작/종료가 반복되는 채터링을 막기 위함).
+    PIVOT_EXIT_HEADING_ERROR_DEG = 15.0
+
+    # 이 속도[km/h] 이하로 떨어져야 실제로 제자리 회전을 시작한다.
+    # 아직 이 값보다 빠르면 조향 없이 순수 감속만 한다.
+    PIVOT_MAX_ENTRY_SPEED_KMH = 3.0
+
+    # 제자리 회전 시 moveAD weight. STEER_MAX_WEIGHT와 별개로 둬서
+    # 필요하면 회전 세기를 독립적으로 튜닝할 수 있게 한다.
+    PIVOT_TURN_WEIGHT = 0.85
+
+    # current_path_is_risky일 때(방어 패딩을 무시한 최후 수단 우회
+    # 경로) 강제로 낮추는 최고 속도 [km/h].
+    RISKY_DETOUR_MAX_SPEED_KMH = 8.0
+
     ALIGNMENT_HOLD_ANGLE_DEG = 35.0
 
     def __init__(
@@ -861,6 +891,17 @@ class TankDriveController:
         #                자동으로 'advance'로 복귀한다.
         self.vehicle_mode = 'advance'
 
+        # 후퇴 중 "제자리 회전" 단계에 들어와 있는지 여부.
+        # get_action()이 이 플래그로 브레이크 전용 / 제자리 회전 /
+        # 정상 추종 세 상태를 오간다. vehicle_mode가 'retreat'를
+        # 벗어나는 모든 지점에서 함께 False로 리셋해야 한다.
+        self._pivoting = False
+
+        # 지금 self.current_path가 _find_path_with_recovery()의 최후
+        # 수단(방어 패딩 무시 우회)으로 나온 경로인지 여부. True면
+        # get_action()이 최고 속도를 강제로 낮춰서 저속 통과시킨다.
+        self.current_path_is_risky = False
+
         # 실제로 지나온 world 좌표 breadcrumb. 후퇴 경로의 재료가 된다.
         # self.current_path는 항상 '미래로 갈 경로'만 들고 있어서 과거 이동
         # 기록이 따로 없기 때문에 이 리스트를 새로 둔다.
@@ -934,6 +975,7 @@ class TankDriveController:
 
         if dist_to_retreat_target <= self._retreat_arrival_tolerance_m:
             self.vehicle_mode = 'advance'
+            self._pivoting = False
 
             # retreat 중 그대로 유지되던 D* Lite 재계획 추적 상태를 지워서
             # 다음 get_action() tick이 grid 변화 여부와 무관하게 무조건
@@ -1152,6 +1194,14 @@ class TankDriveController:
                     f"무시함(신뢰도 낮은 좌표로 간주): {unmatched}"
                 )
 
+            # 타입 재분류로 패딩 반경이 커지면(예: 미분류 -> enemy_tank,
+            # ±49칸) 지금 따라가던 경로가 새로 막힐 수 있다. pad_object()
+            # 경로(_process_object_detected)와 동일한 판단/후퇴/재탐색
+            # 로직을 그대로 태운다 — 차량이 멈춰있어서 이번 tick에 grid가
+            # 안 바뀐 것으로 보이더라도(예전 버그) 여기서 즉시 처리한다.
+            if changed_cells:
+                self._handle_obstacle_change(changed_cells)
+
         except Exception as exc:
             # 백그라운드 스레드라 예외가 호출자에게 안 올라간다. 콘솔에
             # 남겨서 조용히 묻히지 않게 한다.
@@ -1237,101 +1287,143 @@ class TankDriveController:
                 # 매번 아무 변화 없어도 렌더 스레드를 새로 띄우면 낭비다.
                 self.render_map("D* Lite Map (오브젝트 탐지 갱신)")
 
-            current_position = self.current_pos
-            destination_xz = self.dest
+            return self._handle_obstacle_change(changed_cells)
 
-            if current_position is None or destination_xz is None:
+        except Exception as exc:
+            print(f"[_process_object_detected] 처리 실패: {exc}")
+            return {"status": "error", "error": str(exc)}
+
+    def _handle_obstacle_change(self, changed_cells) -> Dict[str, Any]:
+        """
+        장애물 grid가 바뀐 뒤(새 위협 패딩이든, 기존 정적 장애물의
+        타입 재분류로 패딩이 커진 것이든) 공통으로 타는 판단 로직.
+
+        _process_object_detected()(pad_object 경로)와
+        _process_objects_detected()(update_obstacles_type 경로) 양쪽
+        모두 여기를 거친다 — "이 변경이 새 위협 때문이냐 원래 있던
+        정적 장애물이냐"는 구분하지 않는다. 대신 딱 하나만 본다:
+        "지금 서 있는 칸이 이번에 새로 막힌 칸에 포함되는가."
+
+        분기:
+            1) changed_cells가 비었다 -> 아무 것도 안 함.
+            2) current_path가 이 변경으로 안 막혔다 -> 아무 것도 안 함
+               (패딩만 반영되고 계속 원래 경로로 진행).
+            3) 막혔는데 지금 서 있는 칸은 안 막혔다 -> 그 자리에서
+               곧바로 (패딩 포함) 재탐색만 하고 advance 유지. 이게
+               "인식 -> 패딩 -> 패딩 포함 새 경로 -> 시행" 흐름이고,
+               STOP이 제대로 동작하는 지금은 이게 정상 케이스가 된다.
+            4) 막혔고 지금 서 있는 칸 자체가 막혔다 -> 드문 예외
+               케이스. 후퇴가 필요하다.
+
+        이 판단은 차량이 지금 이동 중이든 정지해 있든 상관없이 항상
+        즉시 실행된다 — get_action()의 "grid가 바뀌었나" tick 체크에
+        기대지 않는다 (정지 상태에서 재탐색이 안 걸리던 예전 버그의
+        원인).
+        """
+        if not changed_cells:
+            return {"status": "no_change"}
+
+        current_position = self.current_pos
+        destination_xz = self.dest
+
+        if current_position is None or destination_xz is None:
+            return {
+                "status": "padded_only",
+                "reason": "position/destination not ready",
+                "changed_cells": len(changed_cells),
+            }
+
+        with self.planner_lock:
+            # current_path가 이미 비어있는 상태(예: 직전 재탐색 실패로 멈춰있는
+            # 상황)도 '막힘'으로 간주해야 한다 — 그렇지 않으면 is_path_blocked()가
+            # 빈 리스트에 대해 False를 반환해서 멈춰있는 차량을 그대로 방치한다.
+            blocked = (
+                not self.current_path
+                or self.planner.is_path_blocked(self.current_path)
+            )
+
+            if not blocked:
                 return {
-                    "status": "padded_only",
-                    "reason": "position/destination not ready",
-                    "changed_cells": len(changed_cells or []),
+                    "status": "clear",
+                    "path_blocked": False,
+                    "changed_cells": len(changed_cells),
                 }
 
-            with self.planner_lock:
-                # current_path가 이미 비어있는 상태(예: 직전 재탐색 실패로 멈춰있는
-                # 상황)도 '막힘'으로 간주해야 한다 — 그렇지 않으면 is_path_blocked()가
-                # 빈 리스트에 대해 False를 반환해서 멈춰있는 차량을 그대로 방치한다.
-                blocked = (
-                    not self.current_path
-                    or self.planner.is_path_blocked(self.current_path)
-                )
+            current_grid = self.planner.world_to_grid(
+                current_position, clamp=True,
+            )
+            standing_on_blocked_cell = not self.planner.is_free(current_grid)
 
-                if not blocked:
-                    return {
-                        "status": "clear",
-                        "path_blocked": False,
-                        "changed_cells": len(changed_cells or []),
-                    }
+            if standing_on_blocked_cell:
+                # 드문 예외 케이스: 지금 서 있는 자리 자체가 막혔다
+                # (예: 바로 위에 갑자기 나타난 경우). 후퇴가 필요하다.
+                retreat_path = self._build_retreat_path()
 
-                current_grid = self.planner.world_to_grid(
-                    current_position, clamp=True,
-                )
-                standing_on_blocked_cell = not self.planner.is_free(current_grid)
+                if retreat_path is None:
+                    # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
+                    # 그 자리에서 강제 재탐색을 시도한다. _find_path_with_recovery()가
+                    # 국소 비상해제 -> 전체 재탐색 -> 방어 패딩 무시 우회까지
+                    # 순서대로 시도해준다. (단, latest_info 기반 적 전차 마스킹은
+                    # 이 경로에서 지원되지 않는다 — _find_path_with_recovery가
+                    # 내부적으로 find_path(pos, dest)를 latest_info 없이 호출하기
+                    # 때문.)
+                    # planner_lock은 RLock이라 이미 진입한 with 블록 안에서
+                    # 다시 잡아도 안전하다(재진입 허용).
+                    new_path = self.planner._find_path_with_recovery(
+                        current_position, destination_xz,
+                    )
+                    is_risky = self.planner.last_path_is_risky_detour
 
-                if standing_on_blocked_cell:
-                    retreat_path = self._build_retreat_path()
-
-                    if retreat_path is None:
-                        # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
-                        # 그 자리에서 강제 재탐색을 시도한다.
-                        #
-                        # 이 분기에 들어왔다는 것 자체가 "지금 서 있는 셀이 막혀
-                        # 있다"는 뜻이라 find_path()를 그대로 부르면 시작점 검증에서
-                        # 무조건 ValueError가 난다. 그래서 clear_start_area()로
-                        # 반경을 넓혀가며 실제로 뚫어주는 _find_path_with_recovery()를
-                        # 써야 한다. (단, latest_info 기반 적 전차 마스킹은 이 경로에서
-                        # 지원되지 않는다 — _find_path_with_recovery가 내부적으로
-                        # find_path(pos, dest)를 latest_info 없이 호출하기 때문.)
-                        new_path = self.planner._find_path_with_recovery(
-                            current_position, destination_xz,
-                        )
-
-                        self.current_path = new_path or []
-                        self.vehicle_mode = 'advance'
-                        self.speed_pid.reset()
-                        self.steering_pid.reset()
-
-                        return {
-                            "status": "forced_replan_no_history",
-                            "path_blocked": True,
-                            "changed_cells": len(changed_cells or []),
-                        }
-
-                    self.current_path = retreat_path
-                    self.vehicle_mode = 'retreat'
+                    self.current_path = new_path or []
+                    self.current_path_is_risky = bool(new_path) and is_risky
+                    self.vehicle_mode = 'advance'
+                    self._pivoting = False
                     self.speed_pid.reset()
                     self.steering_pid.reset()
 
                     return {
-                        "status": "retreating",
+                        "status": "forced_replan_no_history",
                         "path_blocked": True,
-                        "changed_cells": len(changed_cells or []),
-                        "retreat_points": len(retreat_path),
+                        "changed_cells": len(changed_cells),
+                        "risky_detour": self.current_path_is_risky,
                     }
 
-                else:
-                    try:
-                        new_path = self.planner.find_path(
-                            current_position, destination_xz, self.latest_info,
-                        )
-                    except ValueError as exc:
-                        print("D* Lite 강제 재탐색 실패:", exc)
-                        new_path = []
+                self.current_path = retreat_path
+                self.current_path_is_risky = False
+                self.vehicle_mode = 'retreat'
+                self.speed_pid.reset()
+                self.steering_pid.reset()
 
-                    self.current_path = new_path or []
-                    self.vehicle_mode = 'advance'
+                return {
+                    "status": "retreating",
+                    "path_blocked": True,
+                    "changed_cells": len(changed_cells),
+                    "retreat_points": len(retreat_path),
+                }
 
-                    return {
-                        "status": "replanned",
-                        "path_blocked": True,
-                        "changed_cells": len(changed_cells or []),
-                    }
+            else:
+                # 정상 케이스(STOP이 제대로 동작하면 대부분 여기로 옴):
+                # 서 있는 자리는 멀쩡하니 후퇴할 필요 없이, 지금 위치에서
+                # 곧바로 (패딩 포함) 재탐색만 하면 된다. 여기서도 단순
+                # find_path() 한 번이 아니라 _find_path_with_recovery()를
+                # 써서, 통로 자체가 넓게 끊긴 경우(예: enemy_tank ±49칸
+                # 패딩)까지 놓치지 않고 재시도한다.
+                new_path = self.planner._find_path_with_recovery(
+                    current_position, destination_xz,
+                )
+                is_risky = self.planner.last_path_is_risky_detour
 
-        except Exception as exc:
-            # 백그라운드 스레드라 예외가 호출자에게 안 올라간다. 콘솔에
-            # 남겨서 조용히 묻히지 않게 한다.
-            print(f"[_process_object_detected] 처리 실패: {exc}")
-            return {"status": "error", "message": str(exc)}
+                self.current_path = new_path or []
+                self.current_path_is_risky = bool(new_path) and is_risky
+                self.vehicle_mode = 'advance'
+                self._pivoting = False
+
+                return {
+                    "status": "replanned",
+                    "path_blocked": True,
+                    "changed_cells": len(changed_cells),
+                    "risky_detour": self.current_path_is_risky,
+                }
 
     # --------------------------------------------------------
     # 내부 상태 관리
@@ -1845,6 +1937,8 @@ class TankDriveController:
         # 새 episode에서는 이전 episode의 breadcrumb/후퇴 상태가
         # 섞이지 않도록 항상 advance로 초기화한다.
         self.vehicle_mode = 'advance'
+        self._pivoting = False
+        self.current_path_is_risky = False
         self.position_history = []
 
         self._reset_control_state(
@@ -1906,6 +2000,8 @@ class TankDriveController:
 
         # 새 목적지가 들어오면 후퇴 중이었더라도 전진 상태로 복귀한다.
         self.vehicle_mode = 'advance'
+        self._pivoting = False
+        self.current_path_is_risky = False
 
         self._reset_control_state(
             reset_destination_signature=True,
@@ -2165,6 +2261,7 @@ class TankDriveController:
             # 자체 인지 기반 후퇴 중이었더라도 전진 상태로 복귀해 새 맵 기준으로
             # 다시 계획한다.
             self.vehicle_mode = 'advance'
+            self._pivoting = False
 
             try:
                 with self.planner_lock:
@@ -2601,6 +2698,85 @@ class TankDriveController:
         }, info
 
     # --------------------------------------------------------
+    # 후퇴 중 제자리 회전(피벗턴)
+    # --------------------------------------------------------
+
+    def _make_pivot_turn_command(
+        self,
+        heading_error_deg: float,
+    ) -> Dict[str, Any]:
+        """
+        moveWS는 완전히 끄고 moveAD만 걸어서 제자리에서 선회시킨다.
+
+        탱크(궤도 차량)는 자동차와 달리 좌우 궤도를 서로 반대로
+        돌리면 전진 없이 제자리에서 방향을 바꿀 수 있다. 이 함수는
+        그 축만 쓴다 — moveWS 쪽은 항상 빈 명령으로 둔다.
+
+        부호 규약은 _calculate_steering_command()의 steer_output과
+        동일하게 맞춘다: heading_error_deg가 양수면 목표 방향이
+        시계방향(D)에 있다는 뜻이라 D, 음수면 A.
+
+        Args:
+            heading_error_deg:
+                목표 heading과 현재 차체 yaw의 차이 [deg].
+                (부호는 이 클래스의 heading_error 계산과 동일 규약)
+
+        Returns:
+            Flask 서버가 그대로 jsonify할 수 있는 command dictionary.
+        """
+        if heading_error_deg > 0.0:
+            ad_command = "D"
+        elif heading_error_deg < 0.0:
+            ad_command = "A"
+        else:
+            ad_command = ""
+
+        return {
+            "moveWS": {
+                "command": "",
+                "weight": 0.0,
+            },
+            "moveAD": {
+                "command": ad_command,
+                "weight": (
+                    self.PIVOT_TURN_WEIGHT
+                    if ad_command
+                    else 0.0
+                ),
+            },
+            "turretQE": {"command": "", "weight": 0.0},
+            "turretRF": {"command": "", "weight": 0.0},
+            "fire": False,
+        }
+
+    def _make_brake_only_command(self) -> Dict[str, Any]:
+        """
+        moveAD 없이 moveWS만 'S', weight=1.0으로 걸어서 순수 감속시킨다.
+
+        후퇴 중 heading_error가 커서 제자리 회전이 필요한데 아직
+        속도가 남아있을 때 쓴다. 브레이크와 조향을 동시에 최대로
+        걸면(기존 방식) 속도가 죽는 동안 넓은 반경으로 도는 원호가
+        나오므로, 그 원호 자체를 없애기 위해 이 구간에서는 조향을
+        아예 0으로 묶어둔다.
+
+        Returns:
+            Flask 서버가 그대로 jsonify할 수 있는 command dictionary.
+        """
+        return {
+            "moveWS": {
+                "command": "S",
+                "weight": 1.0,
+            },
+            "moveAD": {
+                "command": "",
+                "weight": 0.0,
+            },
+            "turretQE": {"command": "", "weight": 0.0},
+            "turretRF": {"command": "", "weight": 0.0},
+            "fire": False,
+        }
+
+    # --------------------------------------------------------
     # /get_action
     # --------------------------------------------------------
 
@@ -2794,6 +2970,9 @@ class TankDriveController:
                         )
                     )
 
+                    # 정상적으로 바로 찾은 경로다 -> 위험 우회 플래그 해제.
+                    self.current_path_is_risky = False
+
                     if not self.current_path:
                         # find_path()가 예외 없이 빈 경로만 반환한 경우
                         # (시작점/목적지 자체는 안 막혔는데 그 사이에 경로가
@@ -2801,9 +2980,10 @@ class TankDriveController:
                         # 안전 반경이 두 지점 사이를 완전히 갈라놓은 경우).
                         # 그대로 두면 다음 tick에도 똑같은 조건(경로 없음)이라
                         # 다시 find_path()만 반복 호출하고 매번 빈 경로만
-                        # 나오는 게 무한 반복된다. clear_start_area로 점점
-                        # 넓혀가며 재시도하는 _find_path_with_recovery()로
-                        # 한 번 더 시도한다.
+                        # 나오는 게 무한 반복된다. clear_start_area 반경 확장
+                        # -> 전체 재탐색 -> 방어 패딩 무시 우회까지 순서대로
+                        # 시도하는 _find_path_with_recovery()로 한 번 더
+                        # 시도한다.
                         print(
                             "[/get_action] find_path()가 빈 경로를 반환함"
                             "(시작/목적지 자체는 안 막혔지만 그 사이 경로가 "
@@ -2814,6 +2994,10 @@ class TankDriveController:
                                 self.current_pos, self.dest,
                             )
                         )
+                        self.current_path_is_risky = (
+                            bool(self.current_path)
+                            and self.planner.last_path_is_risky_detour
+                        )
 
         except ValueError as exc:
             print(
@@ -2821,6 +3005,7 @@ class TankDriveController:
                 exc,
             )
             self.current_path = []
+            self.current_path_is_risky = False
 
             with self.planner_lock:
                 current_grid = self.planner.world_to_grid(
@@ -2845,7 +3030,12 @@ class TankDriveController:
                                 self.current_pos, self.dest,
                             )
                         )
+                        self.current_path_is_risky = (
+                            bool(self.current_path)
+                            and self.planner.last_path_is_risky_detour
+                        )
                         self.vehicle_mode = 'advance'
+                        self._pivoting = False
 
                     if self.current_path:
                         self.speed_pid.reset()
@@ -2901,6 +3091,76 @@ class TankDriveController:
                 "heading_error_deg"
             ]
         )
+
+        # ----------------------------------------------------
+        # 3-1) 급선회 구간: 감속과 회전을 분리한다
+        # ----------------------------------------------------
+        # 브레이크(moveWS)와 조향(moveAD)을 동시에 최대로 걸면 속도가
+        # 남아있는 동안 넓은 반경의 원호를 그린다. 탱크는 제자리
+        # 선회가 가능한 차량이므로, heading_error가 크면
+        #   1) 아직 속도가 남아있다 -> moveAD=0으로 순수 감속만
+        #   2) 속도가 거의 죽었다  -> moveWS=0으로 제자리 회전만
+        # 두 단계로 나눠서 처리하고, heading_error가 다시 좁혀지면
+        # 정상 추종(전진+조향)으로 복귀한다.
+        #
+        # 원래는 vehicle_mode == 'retreat'일 때만 적용했으나,
+        # handle_update_obstacles()가 /update_obstacle 수신 시 후퇴
+        # 도중이라도 vehicle_mode를 'advance'로 강제 전환하는 지점이
+        # 있어서, 후퇴 관성(heading_error 100도 이상 + 속도 40km/h대)이
+        # 남아있는 채로 'advance' 로직(조향을 안 끊고 브레이크만 거는
+        # 방식)으로 넘어가 버리면 이 안전장치를 건너뛰게 된다.
+        # 실제로 이 경로로 맵 경계까지 밀려나가 충돌한 사례가 있어
+        # vehicle_mode와 무관하게 heading_error 크기만으로 판단한다.
+        if self._pivoting:
+            if abs(heading_error_deg) <= self.PIVOT_EXIT_HEADING_ERROR_DEG:
+                # 방향이 충분히 맞춰졌다 -> 회전 종료, 정상 추종 재개.
+                self._pivoting = False
+                self.speed_pid.reset()
+                self.steering_pid.reset()
+            else:
+                pivot_command = self._make_pivot_turn_command(
+                    heading_error_deg,
+                )
+
+                print(
+                    f"[/get_action PIVOT] 제자리 회전 중 | "
+                    f"heading_error={heading_error_deg:.2f}deg "
+                    f"speed={current_speed_kmh:.2f}km/h "
+                    f"AD={pivot_command['moveAD']}"
+                )
+
+                return pivot_command
+
+        elif abs(heading_error_deg) > self.PIVOT_ENTER_HEADING_ERROR_DEG:
+            if current_speed_kmh > self.PIVOT_MAX_ENTRY_SPEED_KMH:
+                # 아직 속도가 안 죽었다 -> 조향 없이 순수 감속만.
+                brake_command = self._make_brake_only_command()
+
+                print(
+                    f"[/get_action PIVOT] 급선회 필요, 감속 우선 | "
+                    f"heading_error={heading_error_deg:.2f}deg "
+                    f"speed={current_speed_kmh:.2f}km/h"
+                )
+
+                return brake_command
+
+            # 속도가 충분히 죽었다 -> 이번 tick부터 제자리 회전 시작.
+            self._pivoting = True
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+
+            pivot_command = self._make_pivot_turn_command(
+                heading_error_deg,
+            )
+
+            print(
+                f"[/get_action PIVOT] 제자리 회전 시작 | "
+                f"heading_error={heading_error_deg:.2f}deg "
+                f"speed={current_speed_kmh:.2f}km/h "
+                f"AD={pivot_command['moveAD']}"
+            )
+
+            return pivot_command
 
         # ----------------------------------------------------
         # 4) 목적지 제동거리 / 속도 PID
@@ -3046,11 +3306,22 @@ class TankDriveController:
             )
         )
 
-        # 목적지/코너/정렬/최고속도 중 가장 낮은 값을 실제 목표속도로 사용한다.
+        # 지금 경로가 _find_path_with_recovery()의 최후 수단(방어 패딩
+        # 무시 우회)이면, 실제 위협 안전거리 없이 지나가는 구간이라
+        # 최고 속도 자체를 강하게 낮춰서 저속으로만 통과시킨다.
+        risky_detour_speed_limit_kmh = (
+            self.RISKY_DETOUR_MAX_SPEED_KMH
+            if self.current_path_is_risky
+            else self.MAX_SPEED_KMH
+        )
+
+        # 목적지/코너/정렬/최고속도/위험우회 중 가장 낮은 값을 실제
+        # 목표속도로 사용한다.
         target_speed_kmh = min(
             destination_target_speed_kmh,
             corner_speed_limit_kmh,
             alignment_speed_limit_kmh,
+            risky_detour_speed_limit_kmh,
             self.MAX_SPEED_KMH,
         )
         if abs(heading_error_deg) >= self.ALIGNMENT_HOLD_ANGLE_DEG:
