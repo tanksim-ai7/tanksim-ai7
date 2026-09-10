@@ -47,8 +47,13 @@ POSITION_HISTORY = defaultdict(lambda: deque(maxlen=5))   # 클래스별 최근 
 OUTLIER_THRESHOLD = 15.0   # 중앙값에서 이 거리(m) 이상 벗어나면 이상치로 간주하고 제외
 MIN_SAMPLES_BEFORE_OUTPUT = 3   # 이 개수만큼 쌓이기 전엔 값을 내보내지 않음
 
+# [NEW] "튄 값"과 "진짜 이동"을 구분하기 위한 설정
+PENDING_JUMP = {}          # {class_name: {"pos":.., "count":..}} - 이동 후보 임시 저장
+JUMP_CONFIRM_COUNT = 2     # 이 횟수만큼 연속으로 비슷한 새 위치가 나오면 "진짜 이동"으로 인정
+JUMP_CONFIRM_RADIUS = 5.0  # 이 반경(m) 안에서 계속 관측되면 "같은 이동"으로 봄
+
 # 기능(함수) 모음 cell
-# [NEW] 이미지 하나당 YOLO 추론을 딱 1번만 실행 (클래스별로 재추론하지 않음)
+# 이미지 하나당 YOLO 추론을 딱 1번만 실행 (클래스별로 재추론하지 않음)
 def run_inference(image_path):
     results = model(image_path, verbose=False)
     img_h, img_w = results[0].orig_shape                # 이미지의 가로값, 세로 값을 도출
@@ -58,7 +63,7 @@ def run_inference(image_path):
     return detections, img_w, img_h
 
 
-# [NEW] 이미 뽑아둔 추론 결과(detections)에서 원하는 클래스만 골라내기 (재추론 없음)
+# 이미 뽑아둔 추론 결과(detections)에서 원하는 클래스만 골라내기 (재추론 없음)
 def filter_boxes_by_class(detections, target_class_id):
     return [[float(c) for c in box[:4]] for box in detections if int(box[5]) == target_class_id]
 
@@ -98,29 +103,69 @@ def get_focal_px(img_w, fov_deg=HORIZONTAL_FOV_STEREO):
 
 # 오차값 줄이기 위한 함수
 def smooth_position(class_name, world_pos):
-    # 최근 관측치들의 중앙값을 기준으로, 너무 크게 벗어난(이상치) 값은 제외하고
-    # 나머지를 평균 내서 안정화된 좌표를 반환.
     hist = POSITION_HISTORY[class_name]
+ 
+    # [NEW] 기존 히스토리가 있으면, 새 값이 "이상치"인지 먼저 판단
+    if hist:
+        med = {
+            "x": st.median(p["x"] for p in hist),
+            "y": st.median(p["y"] for p in hist),
+            "z": st.median(p["z"] for p in hist),
+        }
+        d_from_med = ts.math.sqrt(
+            (world_pos["x"]-med["x"])**2 + (world_pos["y"]-med["y"])**2 + (world_pos["z"]-med["z"])**2
+        )
+ 
+        if d_from_med > OUTLIER_THRESHOLD:
+            # 기존 중앙값에서 크게 벗어남 -> 노이즈인지 진짜 이동인지 아직 모름
+            pending = PENDING_JUMP.get(class_name)
+            if pending is not None:
+                d_from_pending = ts.math.sqrt(
+                    (world_pos["x"]-pending["pos"]["x"])**2 +
+                    (world_pos["y"]-pending["pos"]["y"])**2 +
+                    (world_pos["z"]-pending["pos"]["z"])**2
+                )
+            else:
+                d_from_pending = None
+ 
+            if pending is not None and d_from_pending is not None and d_from_pending < JUMP_CONFIRM_RADIUS:
+                # 직전 "이동 후보"와 비슷한 위치 -> 같은 방향으로 계속 움직이는 중
+                pending["pos"] = world_pos
+                pending["count"] += 1
+            else:
+                # 새로운 이동 후보 시작
+                pending = {"pos": world_pos, "count": 1}
+            PENDING_JUMP[class_name] = pending
+ 
+            if pending["count"] >= JUMP_CONFIRM_COUNT:
+                # [핵심] 연속으로 확인됐으니 "진짜 이동"으로 인정 -> 과거 기록 버리고 새로 시작
+                hist.clear()
+                PENDING_JUMP.pop(class_name, None)
+            else:
+                # 아직 확정 전 -> 이번 프레임은 값 보류 (노이즈일 수도 있으니 내보내지 않음)
+                return None
+        else:
+            # 정상 범위 안 -> 이동 후보 상태 초기화
+            PENDING_JUMP.pop(class_name, None)
+ 
     hist.append(world_pos)
-
+ 
     if len(hist) < MIN_SAMPLES_BEFORE_OUTPUT:
-        return None   # 초기엔 값 자체를 안 줌 (원본 그대로 내보내지 않음)
-
-    # 각 축의 중앙값으로 "대략적인 중심"을 잡음
+        return None
+ 
     med = {
         "x": st.median(p["x"] for p in hist),
         "y": st.median(p["y"] for p in hist),
         "z": st.median(p["z"] for p in hist),
     }
-
-    # 중앙값에서 OUTLIER_THRESHOLD 이상 벗어난 관측은 제외
+ 
     def dist_to_med(p):
-        return math.sqrt((p["x"]-med["x"])**2 + (p["y"]-med["y"])**2 + (p["z"]-med["z"])**2)
-
+        return ts.math.sqrt((p["x"]-med["x"])**2 + (p["y"]-med["y"])**2 + (p["z"]-med["z"])**2)
+ 
     filtered = [p for p in hist if dist_to_med(p) <= OUTLIER_THRESHOLD]
     if not filtered:
-        filtered = list(hist)   # 전부 걸러졌으면(극단적 경우) 원본 그대로 사용
-
+        filtered = list(hist)
+ 
     n = len(filtered)
     return {
         "x": sum(p["x"] for p in filtered) / n,
