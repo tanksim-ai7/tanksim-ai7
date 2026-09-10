@@ -7,8 +7,6 @@ from fire.fire_module import FireModule
 import requests
 import threading
 
-import evade_steering as evd
-
 import logging
 
 log = logging.getLogger('werkzeug')
