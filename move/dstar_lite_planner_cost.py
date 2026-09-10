@@ -14,6 +14,8 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 import numpy as np
 
+import random
+
 GridNode = Tuple[int, int]
 WorldPoint = Tuple[float, float]
 INF = float("inf")
@@ -836,26 +838,26 @@ class DStarPlanner:
 
         # self.movable_enemy_tank
         # 움직일 수 있는 적 전차 위치에 대한 변수 업데이트
-        if latest_info != None:
-            cx, cz = latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]
-            body_angle = latest_info["enemyBodyX"]
-            turret_angle = latest_info["enemyTurretX"]
+        # if latest_info != None:
+        #     cx, cz = latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]
+        #     body_angle = latest_info["enemyBodyX"]
+        #     turret_angle = latest_info["enemyTurretX"]
 
-            body_corners = self.get_bb_corners(cx, cz, 3.303, 6.339, body_angle)
-            turret_corners = self.get_bb_corners(cx, cz, 2.681, 2.822, turret_angle)
+        #     body_corners = self.get_bb_corners(cx, cz, 3.303, 6.339, body_angle)
+        #     turret_corners = self.get_bb_corners(cx, cz, 2.681, 2.822, turret_angle)
 
-            body_tiles = self.get_occupied_space(body_corners)
-            turret_tiles = self.get_occupied_space(turret_corners)
+        #     body_tiles = self.get_occupied_space(body_corners)
+        #     turret_tiles = self.get_occupied_space(turret_corners)
 
-            base_enemy_space = body_tiles.union(turret_tiles)
+        #     base_enemy_space = body_tiles.union(turret_tiles)
 
-            padded_enemy_space = set()
-            for x, z in base_enemy_space:
-                for dx in [-1, 0, 1]:
-                    for dz in [-1, 0, 1]:
-                        padded_enemy_space.add((x + dx, z + dz))
+        #     padded_enemy_space = set()
+        #     for x, z in base_enemy_space:
+        #         for dx in [-1, 0, 1]:
+        #             for dz in [-1, 0, 1]:
+        #                 padded_enemy_space.add((x + dx, z + dz))
 
-            self.movable_enemy_tank = padded_enemy_space
+        #     self.movable_enemy_tank = padded_enemy_space
 
         start = self.world_to_grid(current_pos, clamp=True)
         goal = self.world_to_grid(dest, clamp=True)
@@ -1895,6 +1897,47 @@ class DStarPlanner:
             print("grid 저장 완료 (백그라운드)")
 
         return fig, ax
+
+    def get_random_destination(self, data, nxt=None):
+        curr_x = data['playerPos']['x']
+        curr_y = data['playerPos']['y']
+        curr_z = data['playerPos']['z']
+        
+        enemy_x = data['enemyPos']['x']
+        enemy_z = data['enemyPos']['z']
+
+        # 1. 플레이어 주변 및 맵 한계선을 고려한 '전체 가용 범위' 정의
+        x_min = max(0, curr_x - 30)
+        x_max = min(170, curr_x + 30)
+        z_min = max(230, curr_z - 30)
+        z_max = min(300, curr_z + 30)
+
+        # 최대 3000번 무작위로 점을 던져서 조건을 만족하는지 검사
+        for _ in range(3000):
+            # 전체 범위 안에서 완전히 자유롭게 점 추출
+            cand_x = random.uniform(x_min, x_max)
+            cand_z = random.uniform(z_min, z_max)
+            
+            # 조건 A: 적의 z축 ±15 안쪽이 '아니어야' 함 (바깥쪽이어야 함)
+            # 만약 x축도 바깥이어야 한다면 아래 주석 해제된 코드처럼 짤 수 있습니다.
+            is_outside_enemy_z = not (enemy_z - 15 <= cand_z <= enemy_z + 15)
+            is_outside_enemy_x = not (enemy_x - 15 <= cand_x <= enemy_x + 15)
+            
+            # 조건 B: 현재 위치(playerPos)로부터 거리가 30 이상이어야 함
+            dist_from_curr = math.sqrt((cand_x - curr_x)**2 + (cand_z - curr_z)**2)
+            is_far_enough = dist_from_curr >= 30
+
+            tmp = self.world_to_grid([cand_x, cand_z], clamp=True)
+
+            if nxt != None:
+                is_outside_enemy_z2 = not (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
+                is_outside_enemy_x2 = not (nxt[0] - 15 <= cand_x <= nxt[0] + 15)
+                if is_outside_enemy_z2 and is_outside_enemy_x2 and is_outside_enemy_x and is_outside_enemy_z and is_far_enough and self.is_free(tmp):
+                    return (cand_x, cand_z)
+            else:
+                # 모든 조건을 충족하면 즉시 반환 (단조로움 해결!)
+                if is_outside_enemy_x and is_outside_enemy_z and is_far_enough and self.is_free(tmp):
+                    return (cand_x, cand_z)
 
 
 # 기존 이름 호환

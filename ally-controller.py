@@ -7,6 +7,9 @@ import detect.LibraryFile.TankSim as ts
 import detect.LibraryFile.TankSim_kijun as tskijun
 import detect.LibraryFile.TankSim_injee as tsinjee
 import matplotlib
+import requests
+import threading
+import datetime
 
 # 서버 환경에서 matplotlib GUI 창을 열지 않고 map 이미지만 저장한다.
 matplotlib.use("Agg")
@@ -14,6 +17,9 @@ matplotlib.use("Agg")
 # Flask 서버 객체.
 app = Flask(__name__)
 
+SEQ_FLAG = 'first'
+ALLY_DEST_LIST = [(77.0, 281.20)]
+ALLY_DEST_IDX = 0
 
 # YOLO 객체 인식 모델.
 model = YOLO(ts.MODEL_PATH)
@@ -33,6 +39,15 @@ path_planner = DStarLitePlanner()
 # D* Lite 경로 추종 + 속도/조향 PID controller.
 drive_controller = TankDriveController(path_planner)
 
+# 적 전차 타격 횟수
+enemy_hit_count = 0
+pre_hit_time = None
+
+def send_to_5100(target_data, name):
+    try:
+        requests.post("http://127.0.0.1:5100/"+name, json=target_data, timeout=1)
+    except requests.exceptions.RequestException:
+        pass
 
 @app.route('/detect', methods=['POST'])
 def detect():
@@ -112,6 +127,40 @@ def info():
     # 기존 인식팀 /info 처리.
     tskijun.info()
 
+    global ALLY_DEST_IDX, ALLY_DEST_LIST, enemy_hit_count, SEQ_FLAG
+    if enemy_hit_count < 2:
+        if ALLY_DEST_IDX <= len(ALLY_DEST_LIST):
+            if ALLY_DEST_IDX == 0:
+                dest = {
+                    "destination": f"{ALLY_DEST_LIST[ALLY_DEST_IDX][0]}, {data['playerPos']['y']}, {ALLY_DEST_LIST[ALLY_DEST_IDX][1]}"
+                }
+                ALLY_DEST_IDX += 1
+                drive_controller.handle_set_destination(dest)
+            elif ALLY_DEST_LIST[ALLY_DEST_IDX-1][0]-1 <= data['playerPos']['x'] <= ALLY_DEST_LIST[ALLY_DEST_IDX-1][0]+1 and\
+                 ALLY_DEST_LIST[ALLY_DEST_IDX-1][1]-1 <= data['playerPos']['z'] <= ALLY_DEST_LIST[ALLY_DEST_IDX-1][1]+1:
+                ALLY_DEST_LIST.append(path_planner.get_random_destination(data))
+                dest = {
+                    "destination": f"{ALLY_DEST_LIST[ALLY_DEST_IDX][0]}, {data['playerPos']['y']}, {ALLY_DEST_LIST[ALLY_DEST_IDX][1]}"
+                }
+
+                threading.Thread(target=send_to_5100, args=({'next_dest': ALLY_DEST_LIST[ALLY_DEST_IDX]}, 'get_next_dest'), daemon=True).start()
+
+                ALLY_DEST_IDX += 1
+
+                # 여기서 5100에 좌표를 넘겨줘야 함
+                drive_controller.handle_set_destination(dest)
+                if ALLY_DEST_IDX == 2:
+                    SEQ_FLAG = 'second'
+    elif enemy_hit_count == 2:
+        ALLY_DEST_LIST.append((280.0, 170.0))
+        dest = {
+            "destination": "280.0, 0, 170.0"
+        }
+        drive_controller.handle_set_destination(dest)
+        enemy_hit_count += 1
+
+    threading.Thread(target=send_to_5100, args=(data, 'info'), daemon=True).start()
+
     return jsonify(response), status
 
 
@@ -132,38 +181,22 @@ def get_action():
     # D* Lite + PID 차체 이동/조향 명령.
     rst_cmd = drive_controller.get_action(data)
 
-    # PID Controller가 관리하는 실제 속도/yaw 상태와
-    # /info의 실제 차체 yaw 변화량으로 FireModule 협업 입력을 만든다.
-    #
-    # 서버는 playerSpeed/playerBodyX/moveAD를 다시 계산하지 않고
-    # 주행팀이 만든 값을 사격팀에 그대로 전달한다.
-    fire_inputs = (
-        drive_controller.get_fire_control_inputs(
-            rst_cmd
+    global SEQ_FLAG
+    if SEQ_FLAG == 'second':
+        fire_inputs = (
+            drive_controller.get_fire_control_inputs(
+                rst_cmd
+            )
         )
-    )
+        turret_cmd = fm.get_turret_command(
+            my_vel=fire_inputs["my_vel"],
+            body_rate_dps=fire_inputs["body_rate_dps"],
+            hull_settled=fire_inputs["hull_settled"],
+        )
 
-    # 원본 FireModule API는 수정하지 않고 그대로 사용한다.
-    #
-    # my_vel:
-    #     PID Controller가 /info 실제 속도/yaw로 만든 속도 벡터 [m/s].
-    #
-    # body_rate_dps:
-    #     연속된 /info의 playerBodyX 변화량으로 계산한 실제 차체 각속도 [deg/s].
-    #
-    # hull_settled:
-    #     PID Controller가 실제 속도와 실제 차체 회전으로 판단한 정지 여부.
-    turret_cmd = fm.get_turret_command(
-        my_vel=fire_inputs["my_vel"],
-        body_rate_dps=fire_inputs["body_rate_dps"],
-        hull_settled=fire_inputs["hull_settled"],
-    )
-
-    # 이동/조향 명령은 PID controller 결과를 유지하고,
-    # 포탑/사격 key만 FireModule 결과로 병합한다.
-    rst_cmd["turretQE"] = turret_cmd["turretQE"]
-    rst_cmd["turretRF"] = turret_cmd["turretRF"]
-    rst_cmd["fire"] = turret_cmd["fire"]
+        rst_cmd["turretQE"] = turret_cmd["turretQE"]
+        rst_cmd["turretRF"] = turret_cmd["turretRF"]
+        rst_cmd["fire"] = turret_cmd["fire"]
 
     return jsonify(rst_cmd)
 
@@ -177,6 +210,20 @@ def update_bullet():
 
     # FireModule 내부 ShotLog/BiasEstimator에 착탄 결과를 전달한다.
     fm.on_impact(data)
+
+    global enemy_hit_count, pre_hit_time, SEQ_FLAG
+    if data.get('hit') == 'enemy':
+        if pre_hit_time == None:
+            enemy_hit_count += 1
+        elif abs((datetime.datetime.now() - pre_hit_time).total_seconds()) > 1: # 여기서 두번 호출되는 거를 걸러준다.
+            enemy_hit_count += 1
+
+        pre_hit_time = datetime.datetime.now()
+
+    # 여기서 enemy_hit_count가 2일 때 5100포트로 액션 넘겨줘야한다.
+    if enemy_hit_count == 2:
+        SEQ_FLAG = 'third'
+        threading.Thread(target=send_to_5100, args=({}, 'go_third_step'), daemon=True).start()
 
     print(
         f"💥 Bullet Impact at X={data.get('x')}, "
@@ -196,6 +243,9 @@ def set_destination():
 def update_obstacle():
     """장애물 정보를 주행 controller -> RiskDStarPlanner에 전달한다."""
     response, status = drive_controller.handle_update_obstacles(request.get_json())
+
+    threading.Thread(target=send_to_5100, args=(request.get_json(), 'update_obstacle'), daemon=True).start()
+
     return jsonify(response), status
 
 
@@ -230,9 +280,9 @@ def init():
         "blStartX": 60,
         "blStartY": 10,
         "blStartZ": 27.23,
-        "rdStartX": 59,
-        "rdStartY": 10,
-        "rdStartZ": 280,
+        "rdStartX": 111,
+        "rdStartY": 15,
+        "rdStartZ": 172,
         "trackingMode": True,
         "detectMode": False,
         "logMode": True,
@@ -247,6 +297,8 @@ def init():
 
     # D* Lite/PID 내부 상태의 시작 위치 [x, z]를 simulator와 일치시킨다.
     drive_controller.initialize(start_position=(60.0, 27.23))
+
+    threading.Thread(target=send_to_5100, args=(config, 'init'), daemon=True).start()
 
     return jsonify(config)
 
