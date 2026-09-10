@@ -1589,7 +1589,11 @@ class DStarPlanner:
 
                 if desired_type is not None and rect.type != desired_type:
                     chg_list.append((rect.x_min, rect.x_max, rect.z_min, rect.z_max, desired_type))
-
+                    print(   # ← 추가
+                        f"[update_obstacles_type] 재분류: 탐지=({x:.2f},{y:.2f},{z:.2f},{name}) "
+                        f"기존타입={rect.type} -> 새타입={desired_type} "
+                        f"영역=({rect.x_min:.2f}~{rect.x_max:.2f}, {rect.z_min:.2f}~{rect.z_max:.2f})"
+                    )
                 break
 
             if not matched:

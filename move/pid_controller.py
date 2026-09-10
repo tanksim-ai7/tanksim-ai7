@@ -953,6 +953,7 @@ class TankDriveController:
     def _check_retreat_arrival(
         self,
         current_position: Optional[Sequence[float]],
+        previous_position: Optional[Sequence[float]] = None,
     ) -> None:
         """
         후퇴 목표점(retreat 경로의 마지막 점)에 충분히 가까워졌는지 확인하고,
@@ -967,13 +968,45 @@ class TankDriveController:
             return
 
         retreat_target = self.current_path[-1]
+        retreat_start = self.current_path[0]
 
         dist_to_retreat_target = math.hypot(
             retreat_target[0] - current_position[0],
             retreat_target[1] - current_position[1],
         )
 
-        if dist_to_retreat_target <= self._retreat_arrival_tolerance_m:
+        # "그 순간 이동 방향"이 아니라, 이 후퇴 경로 자체의
+        # 시작점(retreat_start) -> 목표점(retreat_target) 방향을 기준선으로
+        # 놓고, 현재 위치가 그 선을 따라 얼마나 진행했는지(progress)로
+        # 판정한다.
+        #
+        # 예전 버전(직전 tick -> 이번 tick 이동방향 기준 내적)의 문제:
+        # 후퇴가 막 시작돼서 아직 관성으로 원래 방향(예: retreat_target과
+        # 반대 방향)으로 계속 가고 있을 때도 "목표에서 멀어지는 중"이라는
+        # 이유로 즉시 passed_target=True가 나와버렸다(실측: 65m나 남은
+        # 시점에 통과 판정 -> 후퇴가 아예 시작도 안 됐는데 advance로
+        # 복귀 -> 그 자리에서 재탐색 실패 -> 비상탈출 경로가 맵 구석까지
+        # 직선으로 이어짐). progress 기준으로 바꾸면 순간적인 관성 방향과
+        # 무관하게, 실제로 시작점에서 목표점까지의 거리를 다 주파했을
+        # 때만(progress>=1.0) True가 된다.
+        passed_target = False
+        ref_dx = retreat_target[0] - retreat_start[0]
+        ref_dz = retreat_target[1] - retreat_start[1]
+        ref_len_sq = ref_dx * ref_dx + ref_dz * ref_dz
+        if ref_len_sq > 1e-6:
+            progress = (
+                (current_position[0] - retreat_start[0]) * ref_dx
+                + (current_position[1] - retreat_start[1]) * ref_dz
+            ) / ref_len_sq
+            passed_target = progress >= 1.0
+
+        print(
+            f"[RETREAT TRACK] pos={current_position} target={retreat_target} "
+            f"dist={dist_to_retreat_target:.2f}m tol={self._retreat_arrival_tolerance_m}m "
+            f"passed={passed_target}"
+        )
+        
+        if dist_to_retreat_target <= self._retreat_arrival_tolerance_m or passed_target:
             self.vehicle_mode = 'advance'
             self._pivoting = False
 
@@ -1180,6 +1213,20 @@ class TankDriveController:
             설계해야 한다.)
         """
         try:
+            risky = [d for d in detections if len(d) >= 4 and d[3] == 'Tank1']
+            if risky and self.vehicle_mode != 'retreat':
+                # 이미 후퇴 중일 때는 건드리지 않는다. Tank1은 시야에
+                # 있는 동안 매 프레임 다시 탐지되는데, 여기서 매번
+                # current_path를 비워버리면 후퇴 경로 자체가 실행 도중
+                # 계속 취소되어 "후퇴 자체를 못 하는" 상태가 된다
+                # (실측: 후퇴 시작 직후 재탐지로 즉시 취소됨).
+                with self.planner_lock:
+                    self.current_path = []
+                print(
+                    f"[_process_objects_detected] 위험 객체 {len(risky)}건 탐지 -> "
+                    f"즉시 정지(경로 비움)"
+                )
+
             with self.planner_lock:
                 changed_cells, unmatched = self.planner.update_obstacles_type(
                     detections,
@@ -1271,6 +1318,16 @@ class TankDriveController:
               않고, 예외 발생 시 콘솔에 출력한다.
         """
         try:
+            if obj_type == 'enemy_tank' and self.vehicle_mode != 'retreat':
+                # 이미 후퇴 중일 때는 건드리지 않는다 (이유는
+                # _process_objects_detected의 동일 분기 주석 참고).
+                with self.planner_lock:
+                    self.current_path = []
+                print(
+                    f"[_process_object_detected] {obj_type} 탐지 -> "
+                    f"즉시 정지(경로 비움), pad_object 계산 시작"
+                )
+
             # 패딩 자체는 목적지/현재 위치와 무관하게 항상 먼저 반영한다.
             # (예: restart 직후, 아직 목적지를 안 정한 상태에서 화면에 적 전차가
             # 잡혀도 맵에는 바로 반영되어야 한다.) 그 아래 "지금 경로가 막혔는지
@@ -1391,8 +1448,14 @@ class TankDriveController:
                 self.current_path = retreat_path
                 self.current_path_is_risky = False
                 self.vehicle_mode = 'retreat'
+                self._pivoting = False
                 self.speed_pid.reset()
                 self.steering_pid.reset()
+
+                print(
+                    f"[_handle_obstacle_change] 후퇴 경로 재생성됨(진행 중 재탐지) "
+                    f"-> {len(retreat_path)}개 지점, 새 목표={retreat_path[-1]}"
+                )
 
                 return {
                     "status": "retreating",
@@ -2852,7 +2915,7 @@ class TankDriveController:
         # 자체 인지 기반 회피/후퇴 상태 갱신.
         # dest가 아직 없어도 breadcrumb 자체는 계속 쌓아 둔다.
         self._record_position_history(self.current_pos)
-        self._check_retreat_arrival(self.current_pos)
+        self._check_retreat_arrival(self.current_pos, previous_pos)
 
         if self.dest is None:
             self.speed_pid.reset()
@@ -3024,6 +3087,7 @@ class TankDriveController:
                         print(
                             f"[/get_action] 발밑이 막혀서 후퇴 경로로 전환합니다 ({len(retreat_path)}개 지점)."
                         )
+                        print(f"[RETREAT PATH] points={retreat_path}")
                     else:
                         self.current_path = (
                             self.planner._find_path_with_recovery(
