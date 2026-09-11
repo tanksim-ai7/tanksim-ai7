@@ -7,8 +7,6 @@ import detect.LibraryFile.TankSim as ts
 import detect.LibraryFile.TankSim_kijun as tskijun
 import detect.LibraryFile.TankSim_injee as tsinjee
 import matplotlib
-import requests
-import threading
 
 # 서버 환경에서 matplotlib GUI 창을 열지 않고 map 이미지만 저장한다.
 matplotlib.use("Agg")
@@ -35,11 +33,6 @@ path_planner = DStarLitePlanner()
 # D* Lite 경로 추종 + 속도/조향 PID controller.
 drive_controller = TankDriveController(path_planner)
 
-def send_to_5100(target_data, name):
-    try:
-        requests.post("http://127.0.0.1:5100/"+name, json=target_data, timeout=1)
-    except requests.exceptions.RequestException:
-        pass
 
 @app.route('/detect', methods=['POST'])
 def detect():
@@ -51,10 +44,47 @@ def detect():
     return filtered_results
 
 
+# tskijun.DETECTED_OBJECTS_INFO에 담기는 class_name 중, D* Lite 맵에
+# '적 전차' 장애물로 패딩해야 하는 것들. 다른 클래스(Human/Rock/Tree 등)도
+# 필요해지면 여기에 obj_type 매핑만 추가하면 된다.
+#
+# 각 클래스별 실제 바운딩 박스 크기(pad_object 폴백 시 쓸 half-extent)는
+# pid_controller.py의 TankDriveController._OBJECT_HALF_EXTENTS_M에서
+# 관리한다 (update_obstacles_type() 매칭 실패 시 그쪽에서 계산).
+ENEMY_TANK_CLASSES = {"Tank1", "Tank2"}
+
+
 @app.route('/stereo_image', methods=['POST'])
 def stereo_image():
-    """인식팀 stereo image 모듈을 호출한다."""
+    """
+    인식팀 stereo image 모듈을 호출하고, 새로 확보된 오브젝트 world 좌표를
+    D* Lite planner에 반영한다.
+
+    처리 방식: 먼저 update_obstacles_type()으로 Unity /update_obstacle가
+    이미 등록해둔 고정 오브젝트(예: 고정 배치된 Tank1 모형)와 좌표가
+    겹치는지 확인해서 타입만 재분류하고, 겹치는 게 없는 탐지(예: 실시간
+    으로 움직이는 적 전차)만 pad_object() 기반으로 새 장애물을 등록한다.
+    (drive_controller.handle_objects_detected() 안에서 이 두 단계를
+    자동으로 처리한다.)
+    """
     tskijun.stereo_image()
+
+    # tskijun.stereo_image()가 채워둔 최신 탐지 결과.
+    # [(x, y, z, class_name), ...] 형태.
+    detections = [
+        (x, y, z, class_name)
+        for x, y, z, class_name in tskijun.DETECTED_OBJECTS_INFO
+        if class_name in ENEMY_TANK_CLASSES
+    ]
+
+    if detections:
+        try:
+            drive_controller.handle_objects_detected(detections)
+        except Exception as exc:
+            # 탐지/회피 쪽 예외로 인식 파이프라인 응답 자체가 죽지 않게
+            # 방어한다. 원인은 콘솔에 남긴다.
+            print(f"[/stereo_image] handle_objects_detected 처리 실패: {exc}")
+
     return ts.jsonify({"result": "success"})
 
 
@@ -82,9 +112,7 @@ def info():
     # 기존 인식팀 /info 처리.
     tskijun.info()
 
-    threading.Thread(target=send_to_5100, args=(data, 'info'), daemon=True).start()
-
-    return jsonify(response)
+    return jsonify(response), status
 
 
 @app.route('/get_action', methods=['POST'])
@@ -129,6 +157,7 @@ def get_action():
         my_vel=fire_inputs["my_vel"],
         body_rate_dps=fire_inputs["body_rate_dps"],
         hull_settled=fire_inputs["hull_settled"],
+        inhibit_fire= not fm._fire_allowed(all_info)
     )
 
     # 이동/조향 명령은 PID controller 결과를 유지하고,
@@ -168,10 +197,6 @@ def set_destination():
 def update_obstacle():
     """장애물 정보를 주행 controller -> RiskDStarPlanner에 전달한다."""
     response, status = drive_controller.handle_update_obstacles(request.get_json())
-
-    threading.Thread(target=send_to_5100, args=(request.get_json(), 'update_obstacle'), daemon=True).start()
-
-
     return jsonify(response), status
 
 
@@ -224,14 +249,11 @@ def init():
     # D* Lite/PID 내부 상태의 시작 위치 [x, z]를 simulator와 일치시킨다.
     drive_controller.initialize(start_position=(60.0, 27.23))
 
-    threading.Thread(target=send_to_5100, args=(config, 'init'), daemon=True).start()
-    
     return jsonify(config)
 
 
 @app.route('/start', methods=['GET'])
 def start():
-    """simulator /start endpoint."""
     return jsonify({"control": ""})
 
 
