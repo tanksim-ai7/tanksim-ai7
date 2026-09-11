@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 app = Flask(__name__)
-MODEL_PATH = Path("./models/260819_best.pt")
+MODEL_PATH = Path("./models/0908_best.pt")
 model = YOLO(str(MODEL_PATH))
 
 target_classes = {
@@ -25,6 +25,5 @@ target_classes = {
     7: 'Tank1', 
     8: 'Tank2', 
     9: 'Tent', 
-    10: 'Tree', 
-    11: 'Wall'
+    10: 'Wall'
 }
