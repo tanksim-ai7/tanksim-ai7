@@ -192,6 +192,7 @@ def get_action():
             my_vel=fire_inputs["my_vel"],
             body_rate_dps=fire_inputs["body_rate_dps"],
             hull_settled=fire_inputs["hull_settled"],
+            inhibit_fire= not fm._fire_allowed(all_info),
         )
 
         rst_cmd["turretQE"] = turret_cmd["turretQE"]

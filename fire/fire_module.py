@@ -80,6 +80,11 @@ CFG = {
     "lon_long_max": 7.0,       # 종방향 조준 이동 상한 [m]
 }
 
+FIRE_START_POS = None           # 예: (150.0, 200.0)  이 지점 도달 후 허용
+FIRE_START_RADIUS = 15.0        # 도달 판정 반경 [m]
+
+_fire_released = False          # 한 번 열리면 계속 유지
+
 
 def _norm180(a: float) -> float:
     return (a + 180.0) % 360.0 - 180.0
@@ -117,6 +122,8 @@ class Telemetry:
         if isinstance(e, dict):
             self.enemy = (float(e.get("x", 0)), float(e.get("y", 0)),
                           float(e.get("z", 0)))
+        else:
+            self.enemy = None
         f = lambda k, d: float(r.get(k, d) or 0.0)
         self.body_x = f("playerBodyX", self.body_x)
         self.turret_x = f("playerTurretX", self.turret_x)
@@ -264,6 +271,8 @@ class FireModule:
         self._last_t = None
         self._last_sol = None
 
+        self.enemy_detected : bool = False
+
     # ── /info ────────────────────────────────────────────
     def on_info(self, info: dict):
         self.tm.update(info)
@@ -278,12 +287,93 @@ class FireModule:
         if self.tm.enemy is not None and t is not None:
             self.trk.update(t, self.tm.enemy)
 
+    def set_enemy_detected(self, detected: bool) -> None:
+        """
+        인식팀의 최신 적 전차 탐지 여부를 저장한다.
+
+        Args:
+            detected:
+                이번 stereo/YOLO 프레임에 Tank1/Tank2가 하나 이상 있으면 True.
+        """
+        self.enemy_detected = bool(detected)
+
+    def _build_turret_center_command(self) -> Dict:
+        """
+        적 전차가 보이지 않을 때 포탑 yaw를 현재 차체 정면으로 복귀시킨다.
+
+        Returns:
+            turretQE에만 필요한 Q/E 명령을 넣은 dictionary. pitch는 건드리지
+            않으며 fire는 항상 False다.
+        """
+        idle = {
+            "turretQE": {"command": "", "weight": 0.0},
+            "turretRF": {"command": "", "weight": 0.0},
+            "fire": False,
+        }
+
+        yaw_error_deg = _norm180(self.tm.body_x - self.tm.turret_x)
+
+        # 실측 포탑 최소 step보다 작은 오차에서는 입력을 끊어 hunting을 막는다.
+        yaw_deadband_deg = 0.5
+        if abs(yaw_error_deg) <= yaw_deadband_deg:
+            return idle
+
+        turret_params = self.fc.t
+        control_dt_s = max(0.02, float(self.ctrl_dt))
+
+        # 다음 control tick에 남은 yaw 오차를 대략 소거할 수 있는 비례 weight.
+        yaw_weight = abs(yaw_error_deg) / (
+            turret_params.yaw_rate * control_dt_s
+        )
+        yaw_weight = min(0.85, max(turret_params.w_min, yaw_weight))
+
+        idle["turretQE"] = {
+            "command": "E" if yaw_error_deg > 0.0 else "Q",
+            "weight": round(yaw_weight, turret_params.w_round),
+        }
+
+        return idle
+
+    def _fire_allowed(self, info):
+     # 교전 개시 조건. 조건이 없으면 항상 허용.
+        global _fire_released
+        if _fire_released:
+            return True
+        if FIRE_START_POS is None:
+            return True
+
+        # p = info.get("playerPos") or {}
+        # if FIRE_START_POS is not None and p:
+        #     d = math.hypot(p.get("x", 0) - FIRE_START_POS[0],
+        #                 p.get("z", 0) - FIRE_START_POS[1])
+        #     if d <= FIRE_START_RADIUS:
+        #         _fire_released = True
+        #         print(f"[교전개시] 지점 도달 (거리 {d:.1f}m)")
+        #         return True
+        # return False
+
+        player_pos = (info or {}).get("playerPos") or {}
+        if not player_pos:
+            return False
+
+        distance_m = math.hypot(
+            float(player_pos.get("x", 0.0)) - FIRE_START_POS[0],
+            float(player_pos.get("z", 0.0)) - FIRE_START_POS[1],
+        )
+
+        if distance_m <= FIRE_START_RADIUS:
+            _fire_released = True
+            print(f"[교전개시] 지점 도달 (거리 {distance_m:.1f}m)")
+            return True
+
+        return False
+
     # ── /get_action ──────────────────────────────────────
     def get_turret_command(self,
                            my_vel: Vec3 = (0.0, 0.0, 0.0),
                            body_rate_dps: float = 0.0,
                            hull_settled: Optional[bool] = None,
-                           inhibit_fire: bool = False) -> Dict:
+                           inhibit_fire: bool = True) -> Dict:
         """
         포탑 명령과 사격 여부만 반환한다. 이동 명령은 포함하지 않는다.
 
@@ -295,8 +385,33 @@ class FireModule:
         idle = {"turretQE": {"command": "", "weight": 0.0},
                 "turretRF": {"command": "", "weight": 0.0},
                 "fire": False}
+        
         if not self.tm.ready:
             return idle
+
+        # 현재 우리 전차와 적 전차 사이의 수평 거리 [m].
+        distance_m = dist2d(
+            self.tm.my,
+            self.tm.enemy,
+        )
+
+        # 현재 고도 차이 [m].
+        height_diff_m = (
+            self.tm.my[1]
+            - self.tm.enemy[1]
+        )
+
+        # 현재 거리에서 유효한 탄도 앙각이 존재하는지 확인한다.
+        # 기존 FireControl.solve()가 사용하는 것과 동일한 Ballistics 기준이다.
+        engagement_elevation = self.bal.solve_elevation_cached(
+            distance_m,
+            height_diff_m,
+        )
+
+        # 현재 거리에서 탄도해가 존재하지 않으면
+        # 교전 상태가 아니므로 포탑을 차체 정면으로 복귀한다.
+        if engagement_elevation is None:
+            return self._build_turret_center_command()
 
         if hull_settled is None:
             hull_settled = (self.tm.my_speed <= CFG["halt_speed"]
