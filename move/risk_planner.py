@@ -478,7 +478,7 @@ class RiskDStarPlanner(DStarPlanner):
         pyplot을 쓰지 않고 Figure를 직접 만들어서, 다른 스레드가 동시에
         plot()/plot_async()를 불러도 서로 간섭하지 않는다.
         """
-        return
+        
         fig = Figure(figsize=(8, 8))
         canvas = FigureCanvasAgg(fig)
         ax = fig.add_subplot(111)
