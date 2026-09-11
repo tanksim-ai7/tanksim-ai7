@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from ultralytics import YOLO
 from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 from move.pid_controller import TankDriveController
@@ -255,6 +255,17 @@ def init():
 def start():
     return jsonify({"control": ""})
 
+
+# ── 3D 뷰 + 대시보드 ──────────────────────────────
+from viz3d import attach_viz
+attach_viz(app, fm=fm, drive=drive_controller, detect=tskijun)
+
+
+@app.route('/')
+def dashboard():
+    return Response(
+        open('tactical_dashboard_v16.html', encoding='utf-8').read(),
+        mimetype='text/html')
 
 if __name__ == '__main__':
     # 기존 refactored 서버와 동일하게 병렬 Flask 요청을 허용한다.

@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>전술 통합 대시보드</title>
+<style>
+  :root{
+    --bg: #0c0d0f;
+    --bg-deep: #08090a;
+    --panel: #17181b;
+    --panel-2: #1d1f23;
+    --line: rgba(255,255,255,0.08);
+    --line-soft: rgba(255,255,255,0.05);
+    --amber: #d3fa3c;
+    --amber-dim: #5f7a1a;
+    --steel: #5b8cff;
+    --danger: #ff6b6b;
+    --good: #4fd67a;
+    --khaki: #8b9098;
+    --text: #f2f3f0;
+    --text-dim: #8b8d92;
+    --radius: 18px;
+    --font-ui: 'Inter','Segoe UI','Noto Sans KR',-apple-system,sans-serif;
+    --font-mono: 'Consolas','SFMono-Regular',ui-monospace,monospace;
+    --lime-soft: rgba(211,250,60,0.12);
+    --lime-rest: #2e331e;
+    --hover-ease: cubic-bezier(.22,1,.36,1);
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ height:100%; background:var(--bg-deep); color:var(--text);
+    font-family:var(--font-ui);
+    overflow:hidden; }
+  .mono{ font-family:var(--font-mono); }
+
+  #app{ display:flex; flex-direction:column; height:100vh; padding:14px; gap:14px; }
+
+  /* ===== Top instrument bar ===== */
+  #topbar{ display:flex; align-items:stretch; background:var(--panel);
+    border:1px solid var(--line); border-radius:var(--radius);
+    flex-shrink:0; overflow-x:auto; }
+  #callsign{ display:flex; flex-direction:column; justify-content:center;
+    padding:10px 22px; flex-shrink:0; }
+  #callsign .label{ font-size:9px; letter-spacing:2px; color:var(--text-dim); }
+  #callsign .name{ font-size:16px; font-weight:800; letter-spacing:1px;
+    color:var(--amber); }
+  .instrument{ display:flex; flex-direction:column; justify-content:center;
+    padding:8px 18px; border-left:1px solid var(--line);
+    min-width:70px; flex-shrink:0; }
+  .instrument .k{ font-size:8.5px; letter-spacing:1.5px; color:var(--text-dim); }
+  .instrument .v{ font-size:15px; font-weight:700; color:var(--text);
+    font-variant-numeric:tabular-nums; }
+  .instrument .v.amber{ color:var(--amber); }
+  .instrument .v.danger{ color:var(--danger); }
+  .instrument .v.good{ color:var(--good); }
+  #topbar-spacer{ flex:1; min-width:12px; }
+  #linkstatus{ display:flex; align-items:center; gap:8px; margin:8px 14px;
+    padding:6px 14px; font-size:10px; color:var(--text-dim); flex-shrink:0;
+    background:var(--panel-2); border-radius:20px; }
+  #linkstatus .dot{ width:7px; height:7px; border-radius:50%;
+    background:var(--text-dim); }
+  #linkstatus.live .dot{ background:var(--good); box-shadow:0 0 6px var(--good);
+    animation:pulse 1.6s infinite; }
+  #linkstatus.live{ color:var(--good); }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.4;} }
+
+  /* ===== Main layout =====
+     스케치 구조
+       좌상  3D 경로맵 (가장 크게)     우상  객체 인식 / 객체 목록
+       하단  로그 표시 · 실시간 상태 · 사격 정보
+  */
+  #main{ flex:1; display:flex; gap:14px; overflow:hidden; min-height:0; }
+  #leftcol{ display:flex; flex-direction:column; min-width:0; flex:1; gap:14px; }
+
+  /* ---- 3D map pane (카메라 페인과 같은 형식) ---- */
+  #map-pane{ position:relative; flex:1; min-height:0; background:#000;
+    overflow:hidden; border-radius:var(--radius); border:1px solid var(--line); }
+  #view3d{ width:100%; height:100%; border:0; display:block; background:var(--bg); }
+  #map-caption{ position:absolute; top:14px; left:14px; font-size:10.5px;
+    color:var(--text); background:rgba(12,13,15,0.65); backdrop-filter:blur(6px);
+    padding:6px 14px; border-radius:20px; }
+  #map-readout{ position:absolute; left:14px; bottom:14px; font-size:9.5px;
+    color:var(--text-dim); background:rgba(12,13,15,0.7); backdrop-filter:blur(6px);
+    padding:7px 12px; border-radius:12px; line-height:1.55; }
+  #map-readout b{ color:var(--steel); }
+  #map-readout .enemy b{ color:var(--danger); }
+  #map-placeholder{ position:absolute; inset:0; display:none;
+    flex-direction:column; align-items:center; justify-content:center; gap:10px;
+    color:var(--text-dim); font-size:12px; background:var(--bg); text-align:center; }
+  #map-placeholder .ph-icon{ font-size:32px; opacity:.4; }
+  #map-pane.demo #map-placeholder{ display:flex; }
+  #map-pane.demo #view3d,
+  #map-pane.demo #map-caption,
+  #map-pane.demo #map-readout{ display:none; }
+
+  /* ---- Bottom strip ---- */
+  #logstrip{ height:220px; flex-shrink:0; display:grid;
+    grid-template-columns:1.3fr 1fr 1fr; gap:14px; }
+  .strip-col{ display:flex; flex-direction:column; min-width:0;
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:var(--radius); overflow:hidden; }
+  .strip-head{ display:flex; justify-content:space-between; align-items:center;
+    padding:10px 16px; flex-shrink:0; }
+  .strip-head .t{ font-size:11px; letter-spacing:.5px; color:var(--text);
+    font-weight:700; }
+  .strip-head .n{ font-size:10.5px; color:var(--amber); font-weight:700;
+    background:var(--panel-2); padding:2px 9px; border-radius:12px; }
+  .strip-body{ flex:1; overflow-y:auto; }
+
+  /* ===== Side console ===== */
+  #side{ background:transparent; display:flex; flex-direction:column;
+    overflow:hidden; flex:0 0 340px; min-width:260px; gap:14px; }
+  .sensor-box{ flex:1; background:var(--panel); border:1px solid var(--line);
+    border-radius:var(--radius); display:flex; flex-direction:column;
+    position:relative; overflow:hidden; min-height:0; }
+  .sensor-head{ display:flex; justify-content:space-between; align-items:center;
+    padding:11px 16px; background:var(--panel-2); flex-shrink:0; }
+  .sensor-head .t{ font-size:10.5px; letter-spacing:.5px; color:var(--text);
+    font-weight:700; }
+  .sensor-head .hint{ font-size:10.5px; color:var(--amber); font-weight:700;
+    background:rgba(211,250,60,0.12); padding:2px 9px; border-radius:12px; }
+  .sensor-body{ position:relative; flex:1; min-height:0; overflow:hidden; }
+  #det-feed{ width:100%; height:100%; object-fit:contain; display:block;
+    background:#000; }
+  #det-caption{ position:absolute; top:12px; left:12px; font-size:10px;
+    color:var(--text); background:rgba(12,13,15,0.65); backdrop-filter:blur(6px);
+    padding:5px 12px; border-radius:20px; }
+
+  .expandable-panel{ cursor:pointer; }
+  .expandable-panel, .strip-col, .sensor-box{
+    transition:border-color .28s var(--hover-ease), box-shadow .28s var(--hover-ease); }
+  .expandable-panel:hover{ box-shadow:0 0 0 1.5px var(--amber-dim); }
+  #map-pane:hover, #logstrip > .strip-col:hover, #side > .sensor-box:hover{
+    border-color:var(--amber);
+  }
+  .expandable-panel.expanded{
+    position:fixed !important; left:36px; right:36px; top:36px; bottom:36px;
+    width:auto !important; height:auto !important; z-index:30;
+    box-shadow:0 20px 60px rgba(0,0,0,0.7); }
+  #expand-backdrop{ display:none; position:fixed; inset:0;
+    background:rgba(0,0,0,0.65); backdrop-filter:blur(4px); z-index:29; }
+  #expand-backdrop.show{ display:block; }
+
+  /* ===== Shared rows ===== */
+  .card-body{ padding:2px 0; }
+  .row{ display:flex; justify-content:space-between; align-items:center;
+    padding:8px 16px; border-top:1px solid var(--line-soft); font-size:11px; }
+  .row .tag{ display:flex; align-items:center; gap:7px; }
+  .row .sw{ width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+  .row .m{ color:var(--text-dim); text-align:right;
+    font-variant-numeric:tabular-nums; }
+  .row .m b{ color:var(--text); }
+  .row .m b.good{ color:var(--good); }
+  .row .m b.amber{ color:var(--amber); }
+  .row .m b.danger{ color:var(--danger); }
+  .empty{ padding:12px 16px; font-size:10.5px; color:var(--text-dim);
+    font-style:italic; }
+
+  .bar{ height:4px; border-radius:2px; background:var(--panel-2);
+    margin:0 16px 8px; overflow:hidden; }
+  .bar > i{ display:block; height:100%; border-radius:2px;
+    transition:width .3s ease; }
+
+  .log-row{ display:flex; gap:10px; align-items:flex-start; padding:8px 16px;
+    border-top:1px solid var(--line-soft); font-size:10.5px; }
+  .log-row .ts{ color:var(--text-dim); flex-shrink:0; width:56px; }
+  .log-row .body{ flex:1; color:var(--text); }
+  .log-row .body b{ color:var(--amber); }
+  .log-row.hit .body b{ color:var(--good); }
+  .log-row.miss .body b{ color:var(--danger); }
+  .log-row.system .body{ color:var(--text-dim); font-style:italic; }
+
+  /* 사격 상태 배지 */
+  .fc-badge{ margin:10px 16px 6px; padding:10px 13px; border-radius:12px;
+    background:var(--panel-2); border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:space-between; }
+  .fc-badge .s{ font-size:14px; font-weight:800; letter-spacing:1px;
+    color:var(--text-dim); }
+  .fc-badge .r{ font-size:9px; color:var(--text-dim); letter-spacing:1px; }
+  .fc-badge.fire{ border-color:var(--good); }
+  .fc-badge.fire .s{ color:var(--good); }
+  .fc-badge.hold{ border-color:var(--amber-dim); }
+  .fc-badge.hold .s{ color:var(--amber); }
+
+  ::-webkit-scrollbar{ width:7px; height:7px; }
+  ::-webkit-scrollbar-thumb{ background:rgba(255,255,255,.09); border-radius:4px; }
+  ::-webkit-scrollbar-track{ background:transparent; }
+
+  /* v15 visual treatment only: retain v16 panel geometry and behavior. */
+  #st-myhp, #st-ehp, #fc-state{
+    font-family:var(--font-mono);
+    font-variant-numeric:tabular-nums;
+  }
+  .strip-head .n, .sensor-head .hint{
+    color:var(--amber);
+    background:var(--lime-soft);
+  }
+  /* Soft lime at rest, full lime on header hover; no geometry changes. */
+  .sensor-head .t, .strip-head .t{
+    color:var(--amber);
+    background:var(--lime-rest);
+    border-radius:5px;
+    box-shadow:0 0 0 6px var(--lime-rest);
+    transition:background-color .28s var(--hover-ease),
+      color .28s var(--hover-ease), box-shadow .28s var(--hover-ease);
+  }
+  .sensor-head:hover .t, .strip-head:hover .t{
+    color:var(--bg);
+    background:var(--amber);
+    box-shadow:0 0 0 6px var(--amber);
+  }
+  #map-caption{
+    color:var(--amber);
+    background:var(--lime-rest);
+    border-radius:10px;
+    font-weight:700;
+    transition:background-color .28s var(--hover-ease), color .28s var(--hover-ease);
+  }
+  #map-caption:hover{
+    color:var(--bg);
+    background:var(--amber);
+  }
+  .fc-badge.hold{
+    background:var(--lime-soft);
+    border-color:var(--amber-dim);
+  }
+  .fc-badge.fire{
+    background:rgba(79,214,122,0.08);
+  }
+  #map-readout > :last-child b{ color:var(--amber); }
+  #det-empty{ background:var(--bg); }
+  ::selection{ color:var(--bg); background:var(--amber); }
+
+  @media (prefers-reduced-motion:reduce){
+    .expandable-panel, .strip-col, .sensor-box,
+    .sensor-head .t, .strip-head .t, #map-caption{
+      transition:none;
+    }
+  }
+
+  @media (max-width:1280px){
+    #side{ flex:0 0 280px; }
+    #logstrip{ grid-template-columns:1fr 1fr; }
+    #logstrip > :nth-child(3){ display:none; }
+  }
+</style>
+</head>
+<body>
+<div id="expand-backdrop"></div>
+<div id="app">
+
+  <!-- ===== Top instrument bar ===== -->
+  <div id="topbar">
+    <div id="callsign">
+      <div class="label">TANK CHALLENGE</div>
+      <div class="name">K2A1 · BLUE</div>
+    </div>
+    <div class="instrument"><div class="k">SIM T</div>
+      <div class="v mono" id="i-time">--</div></div>
+    <div class="instrument"><div class="k">SPEED</div>
+      <div class="v mono" id="i-speed">--</div></div>
+    <div class="instrument"><div class="k">RANGE</div>
+      <div class="v mono" id="i-dist">--</div></div>
+    <div class="instrument"><div class="k">HULL</div>
+      <div class="v mono good" id="i-hp">--</div></div>
+    <div class="instrument"><div class="k">ROUNDS</div>
+      <div class="v mono" id="i-shots">--</div></div>
+    <div class="instrument"><div class="k">HIT %</div>
+      <div class="v mono amber" id="i-rate">--</div></div>
+    <div id="topbar-spacer"></div>
+    <div id="linkstatus"><span class="dot"></span><span id="linktext">STANDBY</span></div>
+  </div>
+
+  <!-- ===== Main ===== -->
+  <div id="main">
+
+    <div id="leftcol">
+
+      <!-- 좌상: 3D 경로맵 -->
+      <div id="map-pane" class="expandable-panel">
+        <iframe id="view3d" src="/view3d" title="3D 전장"></iframe>
+        <div id="map-caption">3D 전장 · 경로 · 위협</div>
+        <div id="map-readout">
+          <div>아군 <b class="mono" id="ro-my">--</b></div>
+          <div class="enemy">적 <b class="mono" id="ro-enemy">--</b></div>
+          <div>경로 <b class="mono" id="ro-path">--</b></div>
+        </div>
+        <div id="map-placeholder">
+          <div class="ph-icon">▦</div>
+          <div>3D 뷰 연결 대기</div>
+          <div class="mono" style="font-size:10px; color:var(--text-dim)">
+            attach_viz(app, fm=fm, drive=drive_controller, detect=tskijun)
+          </div>
+        </div>
+      </div>
+
+      <!-- 하단 3분할 -->
+      <div id="logstrip">
+
+        <div class="strip-col">
+          <div class="strip-head">
+            <span class="t">교전 로그</span>
+            <span class="n mono" id="log-count">0</span>
+          </div>
+          <div class="strip-body" id="log-body">
+            <div class="empty">기록 없음</div>
+          </div>
+        </div>
+
+        <div class="strip-col">
+          <div class="strip-head">
+            <span class="t">실시간 상태</span>
+            <span class="n mono" id="st-mode">--</span>
+          </div>
+          <div class="strip-body">
+            <div class="card-body">
+              <div class="row" style="border-top:0">
+                <span class="tag"><span class="sw" style="background:var(--steel)"></span>아군 HP</span>
+                <span class="m"><b class="good" id="st-myhp">--</b></span></div>
+              <div class="bar"><i id="st-myhpbar" style="width:100%;background:var(--good)"></i></div>
+              <div class="row" style="border-top:0">
+                <span class="tag"><span class="sw" style="background:var(--danger)"></span>적 HP</span>
+                <span class="m"><b class="danger" id="st-ehp">--</b></span></div>
+              <div class="bar"><i id="st-ehpbar" style="width:100%;background:var(--danger)"></i></div>
+              <div class="row"><span class="tag">차체 방위</span>
+                <span class="m mono"><b id="st-body">--</b></span></div>
+              <div class="row"><span class="tag">차체 각속도</span>
+                <span class="m mono"><b id="st-rate">--</b></span></div>
+              <div class="row"><span class="tag">주행 상태</span>
+                <span class="m"><b id="st-drive">--</b></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="strip-col">
+          <div class="strip-head">
+            <span class="t">사격 정보</span>
+            <span class="n mono" id="fc-env">--</span>
+          </div>
+          <div class="strip-body">
+            <div class="fc-badge" id="fc-badge">
+              <span class="s" id="fc-state">IDLE</span>
+              <span class="r" id="fc-reason">대기</span>
+            </div>
+            <div class="card-body">
+              <div class="row"><span class="tag">포탑 방위</span>
+                <span class="m mono"><b id="fc-turret">--</b></span></div>
+              <div class="row"><span class="tag">앙각</span>
+                <span class="m mono"><b id="fc-pitch">--</b></span></div>
+              <div class="row"><span class="tag">명중 확률</span>
+                <span class="m mono"><b id="fc-phit">--</b></span></div>
+              <div class="row"><span class="tag">재장전</span>
+                <span class="m mono"><b id="fc-reload">--</b></span></div>
+              <div class="row"><span class="tag">권장 거리</span>
+                <span class="m mono"><b class="amber" id="fc-sug">--</b></span></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- 우측: 객체 인식 -->
+    <div id="side">
+      <div class="sensor-box expandable-panel">
+        <div class="sensor-head">
+          <span class="t">객체 인식</span>
+          <span class="hint mono" id="det-count">0 DET</span>
+        </div>
+        <div class="sensor-body">
+          <img id="det-feed" alt="" style="display:none">
+          <div id="det-caption" style="display:none">DETECT FEED</div>
+          <div class="empty" id="det-empty">영상 대기</div>
+        </div>
+      </div>
+
+      <div class="sensor-box">
+        <div class="sensor-head">
+          <span class="t">탐지 객체</span>
+          <span class="hint mono">THREAT</span>
+        </div>
+        <div class="sensor-body" style="overflow-y:auto">
+          <div id="obj-list"><div class="empty">탐지 없음</div></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════
+//  viz3d 의 /state3d 를 그대로 쓴다. 새 엔드포인트가 필요 없다.
+//  좌상단 3D 맵은 /view3d 를 iframe 으로 끼워 자체 갱신된다.
+// ══════════════════════════════════════════════════════════
+const STATE_URL = "/state3d";
+const POLL_MS = 500;
+const $ = id => document.getElementById(id);
+const fmt = (v,u,d) => (v===null||v===undefined) ? "--"
+  : ((typeof v==="number" ? v.toFixed(d===undefined?1:d) : v) + (u||""));
+
+const FC_STATE = {
+  FIRE:["fire","발사"], SLEW:["hold","조준 중"], RELOAD:["hold","재장전"],
+  HOLD:["hold","확률 미달"], TOFCAP:["hold","거리 초과"],
+  TURNING:["hold","차체 선회"], SETTLE:["hold","차체 정지 대기"],
+  NOTRACK:["hold","추적 불가"], INHIBIT:["","사격 금지"], IDLE:["","대기"],
+};
+const CLS_COLOR = {
+  Tank:"#ff6b6b", Tank1:"#ff6b6b", Tank2:"#ff6b6b",
+  Human:"#d3fa3c", Human1:"#d3fa3c", Human2:"#d3fa3c", Human3:"#d3fa3c",
+  Mine:"#ff9f43", Rock:"#8b9098", Tree:"#4fd67a",
+  Car:"#5b8cff", House:"#8b9098", Tent:"#8b9098", Wall:"#8b9098",
+};
+
+let lastFired = 0;
+const logs = [];
+
+function pushLog(text, kind, t){
+  logs.unshift({t: t==null?0:t, text, kind: kind||""});
+  logs.length = Math.min(logs.length, 60);
+  $("log-body").innerHTML = logs.map(l =>
+    `<div class="log-row ${l.kind}">
+       <span class="ts mono">${l.t.toFixed(1)}</span>
+       <span class="body">${l.text}</span></div>`).join("");
+  $("log-count").textContent = logs.length;
+}
+
+function setLink(live, msg){
+  $("linkstatus").className = live ? "live" : "";
+  $("linktext").textContent = msg || (live ? "LINK LIVE" : "NO SIGNAL");
+}
+
+function render(s){
+  $("i-time").textContent  = fmt(s.t,"",1);
+  $("i-speed").textContent = fmt(s.my_spd," m/s");
+  $("i-dist").textContent  = fmt(s.dist," m");
+  $("i-hp").textContent    = s.my_hp==null ? "--" : s.my_hp;
+  $("i-shots").textContent = `${s.fired ?? 0}/${s.hits ?? 0}`;
+  $("i-rate").textContent  = fmt(s.rate,"%",0);
+  $("i-hp").className = "v mono " +
+    (s.my_hp==null ? "" : s.my_hp>60 ? "good" : s.my_hp>25 ? "amber" : "danger");
+
+  $("ro-my").textContent    = s.my ? `${s.my[0].toFixed(0)}, ${s.my[2].toFixed(0)}` : "--";
+  $("ro-enemy").textContent = s.enemy ? `${s.enemy[0].toFixed(0)}, ${s.enemy[2].toFixed(0)}` : "--";
+  $("ro-path").textContent  = (s.path||[]).length + " pt";
+
+  const hp = (v,tx,bar,col) => {
+    $(tx).textContent = v==null ? "--" : v;
+    $(bar).style.width = (v==null?100:Math.max(0,Math.min(100,v))) + "%";
+    $(bar).style.background = col;
+  };
+  hp(s.my_hp,"st-myhp","st-myhpbar","var(--good)");
+  hp(s.enemy_hp,"st-ehp","st-ehpbar","var(--danger)");
+  $("st-body").textContent  = fmt(s.body,"°");
+  $("st-rate").textContent  = s.body_rate==null ? "--" : fmt(s.body_rate," °/s");
+  $("st-drive").textContent = s.mv || "--";
+  $("st-mode").textContent  = s.mv || "--";
+
+  const st = s.fc || "IDLE";
+  const [cls, reason] = FC_STATE[st] || ["", st];
+  $("fc-badge").className = "fc-badge " + cls;
+  $("fc-state").textContent  = st;
+  $("fc-reason").textContent = reason;
+  $("fc-turret").textContent = fmt(s.turret,"°");
+  $("fc-pitch").textContent  = fmt(s.pitch,"°",2);
+  $("fc-phit").textContent   = s.p_hit==null ? "--" : s.p_hit.toFixed(3);
+  $("fc-reload").textContent = s.reload==null ? "--" : fmt(s.reload," s");
+  $("fc-sug").textContent    = s.suggest==null ? "--" : fmt(s.suggest," m");
+  $("fc-env").textContent    = s.envelope ? `${s.envelope[0]}–${s.envelope[1]} m` : "--";
+
+  const objs = s.objects || [];
+  $("det-count").textContent = objs.length + " DET";
+  $("obj-list").innerHTML = !objs.length
+    ? '<div class="empty">탐지 없음</div>'
+    : objs.slice(0,20).map(o => {
+        const c = CLS_COLOR[o.c] || "var(--khaki)";
+        const th = o.th || 0;
+        return `<div class="row">
+          <span class="tag"><span class="sw" style="background:${c}"></span>${o.c}</span>
+          <span class="m mono">${o.d==null?"":o.d.toFixed(0)+" m"}
+            <b class="${th>.6?"danger":""}">${th.toFixed(2)}</b></span></div>`;
+      }).join("");
+
+  const shots = s.shots || [];
+  if (shots.length && (s.fired ?? 0) > lastFired){
+    const x = shots[0];
+    pushLog(`사격 · 거리 ${x.d ?? "--"} m · <b>${x.hit?"명중":"빗나감"}</b>`
+      + (x.zone ? ` (${x.zone})` : ""), x.hit?"hit":"miss", s.t);
+  }
+  lastFired = s.fired ?? 0;
+}
+
+async function poll(){
+  try{
+    const r = await fetch(STATE_URL, {cache:"no-store"});
+    const s = await r.json();
+    if (s.error) setLink(false,"STATE ERROR");
+    else { render(s); setLink(true); }
+  }catch(e){ setLink(false); }
+  setTimeout(poll, POLL_MS);
+}
+
+// 패널 확대 — 클릭하면 전체 화면
+const backdrop = $("expand-backdrop");
+document.querySelectorAll(".expandable-panel").forEach(p => {
+  p.addEventListener("click", e => {
+    if (e.target.tagName === "IFRAME") return;   // 3D 조작을 방해하지 않는다
+    const on = p.classList.toggle("expanded");
+    backdrop.classList.toggle("show", on);
+  });
+});
+backdrop.addEventListener("click", () => {
+  document.querySelectorAll(".expanded").forEach(p => p.classList.remove("expanded"));
+  backdrop.classList.remove("show");
+});
+
+// /view3d is a separate same-origin document: theme its settings panel too.
+// Only presentation is changed; existing controls and their handlers are retained.
+function theme3dControls(){
+  let doc;
+  try { doc = $("view3d").contentDocument; } catch (_) { return; }
+  if (!doc || !doc.head || !doc.body || doc.getElementById("v16-lime-theme")) return;
+
+  const style = doc.createElement("style");
+  style.id = "v16-lime-theme";
+  style.textContent = `
+    [data-v16-lime-controls]{
+      --v16-lime:#d3fa3c;
+      --v16-ink:#f2f3f0;
+      --v16-muted:#a2aa8c;
+      color-scheme:dark;
+      color:var(--v16-ink) !important;
+      background:rgba(23,27,17,.97) !important;
+      border-color:rgba(211,250,60,.3) !important;
+      box-shadow:inset 0 1px 0 rgba(211,250,60,.06) !important;
+      font-family:'Inter','Segoe UI','Noto Sans KR',-apple-system,sans-serif !important;
+      accent-color:var(--v16-lime) !important;
+    }
+    [data-v16-lime-controls] *{
+      font-family:inherit !important;
+      accent-color:var(--v16-lime) !important;
+    }
+    [data-v16-lime-controls] :is(div,p,label){ color:var(--v16-ink) !important; }
+    [data-v16-lime-controls] :is(small,.muted,.hint){ color:var(--v16-muted) !important; }
+    [data-v16-lime-controls] :is(span,output,b,strong){ color:var(--v16-lime) !important; }
+    [data-v16-lime-controls] :is(output,input[type="number"]){
+      font-family:'Consolas','SFMono-Regular',ui-monospace,monospace !important;
+      font-variant-numeric:tabular-nums;
+    }
+    [data-v16-lime-controls] :is(select,input[type="number"],input[type="text"]){
+      color:var(--v16-ink) !important;
+      background:#0e120a !important;
+      border-color:rgba(211,250,60,.24) !important;
+    }
+    [data-v16-lime-controls] option{ color:var(--v16-ink); background:#171b11; }
+    [data-v16-lime-controls] input[type="range"]{
+      color:var(--v16-lime) !important;
+      accent-color:var(--v16-lime) !important;
+    }
+    [data-v16-lime-controls] button{
+      color:var(--v16-lime) !important;
+      background:rgba(211,250,60,.12) !important;
+      border-color:rgba(211,250,60,.28) !important;
+      transition:background-color .28s cubic-bezier(.22,1,.36,1),
+        color .28s cubic-bezier(.22,1,.36,1),
+        border-color .28s cubic-bezier(.22,1,.36,1) !important;
+    }
+    [data-v16-lime-controls] button:hover{
+      color:#0c0d0f !important;
+      background:var(--v16-lime) !important;
+      border-color:var(--v16-lime) !important;
+    }
+    [data-v16-lime-controls] :is(button,select,input):focus-visible{
+      outline:2px solid var(--v16-lime) !important;
+      outline-offset:2px;
+    }
+    [data-v16-lime-controls] :is(hr,fieldset){ border-color:rgba(211,250,60,.2) !important; }
+    @media (prefers-reduced-motion:reduce){
+      [data-v16-lime-controls] button{ transition:none !important; }
+    }
+  `;
+  doc.head.appendChild(style);
+
+  // Find the shared settings container without depending on /view3d's IDs.
+  // Never theme the renderer canvas or move/replace any of its controls.
+  const markPanel = () => {
+    for (const slider of doc.querySelectorAll('input[type="range"]')){
+      let panel = slider.parentElement;
+      while (panel && panel !== doc.body){
+        if (panel.querySelector('select') && panel.querySelector('input[type="checkbox"]')
+            && !panel.querySelector('canvas,iframe')){
+          panel.setAttribute("data-v16-lime-controls", "");
+          return true;
+        }
+        panel = panel.parentElement;
+      }
+    }
+    return false;
+  };
+  if (!markPanel()){
+    const observer = new MutationObserver(() => {
+      if (markPanel()) observer.disconnect();
+    });
+    observer.observe(doc.body, {childList:true, subtree:true});
+  }
+}
+
+// 3D 뷰 로드 실패 감지
+let mapOk = false;
+$("view3d").addEventListener("load", () => { mapOk = true; theme3dControls(); });
+theme3dControls();
+setTimeout(() => { if (!mapOk) $("map-pane").classList.add("demo"); }, 4000);
+
+pushLog("대시보드 시작", "system", 0);
+poll();
+</script>
+</body>
+</html>
