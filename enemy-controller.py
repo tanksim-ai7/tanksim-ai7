@@ -14,7 +14,7 @@ log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
-path_planner = DStarLitePlanner(is_enemy=True)
+path_planner = DStarLitePlanner()
 drive_controller = TankDriveController(path_planner, 'dstar_enemy_map.png')
 
 fm = FireModule()
@@ -82,6 +82,11 @@ def info():
     data['enemyBodyY'] = playerBodyY
     data['enemyBodyZ'] = playerBodyZ
     data['enemyHealth'] = playerHealth
+
+    response, status = drive_controller.handle_info(data)
+    
+    # 원본 FireModule의 player/enemy/turret/target tracker 상태 갱신.
+    fm.on_info(data)
 
     global SEQ_FLAG, ENEMY_DEST_IDX, ENEMY_DEST_LIST
     if SEQ_FLAG == 'first':

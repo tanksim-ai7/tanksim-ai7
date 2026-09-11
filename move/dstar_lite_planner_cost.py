@@ -1809,6 +1809,7 @@ class DStarPlanner:
         plot_async()가 뜬 스냅샷으로 실제 렌더링을 수행한다.
         pyplot을 쓰지 않고 Figure를 직접 만들어서 스레드 간 간섭을 피한다.
         """
+        return
         fig = Figure(figsize=(8, 8))
         canvas = FigureCanvasAgg(fig)
         ax = fig.add_subplot(111)
