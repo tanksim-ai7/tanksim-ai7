@@ -35,6 +35,18 @@ from matplotlib.colors import to_rgba
 from move.dstar_lite_planner_cost import DStarPlanner, INF
 
 
+# 장애물 사각형 위에 표시할 타입 라벨. enemy/enemy_tank, team/team_tank처럼
+# 첫 글자가 겹치는 쌍이 있어서 tank 계열만 두 글자로 구분한다.
+_OBSTACLE_TYPE_LABEL = {
+    'nature': 'N',
+    'unknown': 'U',
+    'enemy_tank': 'ET',
+    'enemy': 'E',
+    'team': 'T',
+    'team_tank': 'TT',
+}
+
+
 def _cells_to_rgba_overlay(width, height, layers):
     """
     grid 셀 set을 개별 matplotlib Patch로 하나씩 그리면(add_patch 수만 번)
@@ -357,6 +369,17 @@ class RiskDStarPlanner(DStarPlanner):
                     facecolor=color, 
                 )
                 ax.add_patch(patch)
+
+                # 타입 라벨(첫 글자)을 사각형 중앙에 표시.
+                label = _OBSTACLE_TYPE_LABEL.get(obs.type, (obs.type or '?')[:1].upper())
+                ax.text(
+                    (obs.x_min + obs.x_max) / 2.0,
+                    (obs.z_min + obs.z_max) / 2.0,
+                    label,
+                    ha='center', va='center',
+                    fontsize=7, fontweight='bold', color='white',
+                    zorder=5,
+                )
     
             if active_path:
                 px = [point[0] for point in active_path]
@@ -523,6 +546,17 @@ class RiskDStarPlanner(DStarPlanner):
                 facecolor=color, 
             )
             ax.add_patch(patch)
+
+            # 타입 라벨(첫 글자)을 사각형 중앙에 표시.
+            label = _OBSTACLE_TYPE_LABEL.get(obs.type, (obs.type or '?')[:1].upper())
+            ax.text(
+                (obs.x_min + obs.x_max) / 2.0,
+                (obs.z_min + obs.z_max) / 2.0,
+                label,
+                ha='center', va='center',
+                fontsize=7, fontweight='bold', color='white',
+                zorder=5,
+            )
 
         if active_path:
             px = [point[0] for point in active_path]
