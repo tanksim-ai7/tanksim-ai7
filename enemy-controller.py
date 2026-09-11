@@ -124,6 +124,7 @@ def get_next_dest():
 
     global NEXT_ALLY_DEST
     NEXT_ALLY_DEST = data['next_dest']
+    return jsonify({"status": "OK", "message": "next_dest data received"})
 
 @app.route('/get_action', methods=['POST'])
 def get_action():
@@ -176,6 +177,7 @@ def get_action():
 def go_third_step():
     global SEQ_FLAG
     SEQ_FLAG = 'third'
+    return jsonify({"status": "OK", "message": "go_third_step signal received"})
 
 @app.route('/update_bullet', methods=['POST'])
 def update_bullet():
