@@ -199,6 +199,20 @@ def get_action():
         rst_cmd["turretRF"] = turret_cmd["turretRF"]
         rst_cmd["fire"] = turret_cmd["fire"]
 
+    # 지금 어떤 명령이 나가서 전차가 저렇게 움직이는지 최종 확인용 로그.
+    # vehicle_mode/SEQ_FLAG를 같이 찍어서, 회피/후퇴 로그(pid_controller.py
+    # 쪽 [MODE CHANGE], [RETREAT PATH SAVED] 등)와 이 tick의 실제 전송
+    # 명령을 시간순으로 맞춰볼 수 있게 한다.
+    print(
+        f"[/get_action SEND] vehicle_mode={drive_controller.vehicle_mode} "
+        f"SEQ_FLAG={SEQ_FLAG} "
+        f"moveWS={rst_cmd.get('moveWS')} "
+        f"moveAD={rst_cmd.get('moveAD')} "
+        f"turretQE={rst_cmd.get('turretQE')} "
+        f"turretRF={rst_cmd.get('turretRF')} "
+        f"fire={rst_cmd.get('fire')}"
+    )
+
     return jsonify(rst_cmd)
 
 

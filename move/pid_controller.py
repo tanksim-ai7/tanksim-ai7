@@ -889,7 +889,7 @@ class TankDriveController:
         #                self.current_path에 넣은 채 그대로 추종한다.
         #                목표(retreat 경로의 마지막 점)에 가까워지면
         #                자동으로 'advance'로 복귀한다.
-        self.vehicle_mode = 'advance'
+        self._set_vehicle_mode('advance', reason='__init__')
 
         # 후퇴 중 "제자리 회전" 단계에 들어와 있는지 여부.
         # get_action()이 이 플래그로 브레이크 전용 / 제자리 회전 /
@@ -921,6 +921,56 @@ class TankDriveController:
     # --------------------------------------------------------
     # 자체 인지(우리 쪽 파이프라인) 기반 회피/후퇴
     # --------------------------------------------------------
+
+    def _set_vehicle_mode(self, new_mode: str, reason: str) -> None:
+        """
+        self.vehicle_mode를 바꾸는 유일한 통로.
+
+        디버깅 목적(회피/후퇴가 왜 갑자기 들어가거나 풀리는지 원인 추적)
+        으로 만들었다. 파일 안 어디서도 `self.vehicle_mode = 'xxx'`를 직접
+        대입하지 말고 항상 이 메서드를 통해서만 바꿔야, 모드가 바뀔 때마다
+        "어느 호출부에서" "왜" 바뀌었는지 로그 한 줄로 알 수 있다.
+
+        Args:
+            new_mode:
+                'advance' 또는 'retreat'.
+            reason:
+                이 전환을 발생시킨 호출부/조건을 설명하는 짧은 문자열.
+                (예: "retreat_arrival", "obstacle_change_standing_on_blocked")
+        """
+        old_mode = getattr(self, "vehicle_mode", None)
+        self.vehicle_mode = new_mode
+
+        if old_mode != new_mode:
+            print(
+                f"[MODE CHANGE] {old_mode} -> {new_mode} | "
+                f"reason={reason} | pos={self.current_pos} | "
+                f"dest={self.dest}"
+            )
+
+    def _log_retreat_path_saved(
+        self,
+        retreat_path: List["PointXZ"],
+        source: str,
+    ) -> None:
+        """
+        후퇴 경로가 self.current_path에 저장될 때마다 호출해서 남기는
+        전용 로그. vehicle_mode 전환 로그와는 별개로, "어떤 지점들로
+        후퇴 경로가 짜였는지" 자체를 추적하기 위한 것이다.
+
+        Args:
+            retreat_path:
+                _build_retreat_path()가 반환한 [(x, z), ...] 경로.
+            source:
+                후퇴 경로를 만든 호출부 이름
+                (예: "_handle_obstacle_change", "/get_action").
+        """
+        print(
+            f"[RETREAT PATH SAVED] source={source} "
+            f"points={len(retreat_path)} "
+            f"start={retreat_path[0]} goal={retreat_path[-1]} "
+            f"full_path={retreat_path}"
+        )
 
     def _record_position_history(
         self,
@@ -1007,7 +1057,14 @@ class TankDriveController:
         )
         
         if dist_to_retreat_target <= self._retreat_arrival_tolerance_m or passed_target:
-            self.vehicle_mode = 'advance'
+            self._set_vehicle_mode(
+                'advance',
+                reason=(
+                    "retreat_arrival(dist<=tol)"
+                    if dist_to_retreat_target <= self._retreat_arrival_tolerance_m
+                    else "retreat_arrival(passed_target)"
+                ),
+            )
             self._pivoting = False
 
             # retreat 중 그대로 유지되던 D* Lite 재계획 추적 상태를 지워서
@@ -1433,10 +1490,30 @@ class TankDriveController:
 
                     self.current_path = new_path or []
                     self.current_path_is_risky = bool(new_path) and is_risky
-                    self.vehicle_mode = 'advance'
+                    self._set_vehicle_mode(
+                        'advance',
+                        reason=(
+                            "_handle_obstacle_change: standing_on_blocked_cell "
+                            "but no retreat history -> forced replan"
+                        ),
+                    )
                     self._pivoting = False
                     self.speed_pid.reset()
                     self.steering_pid.reset()
+
+                    # vehicle_mode가 이미 advance였다면(예: 시작하자마자
+                    # 막힌 경우) [MODE CHANGE]도 안 찍혀서 완전히 조용히
+                    # 지나간다. 후퇴가 필요한 상황인데 breadcrumb이 없어서
+                    # 후퇴 대신 강제 재탐색으로 넘어간 것 자체가 원인 추적에
+                    # 중요한 이벤트라 항상 남긴다.
+                    print(
+                        f"[_handle_obstacle_change] 서 있는 셀 막힘, 후퇴 기록 "
+                        f"없음 -> 후퇴 대신 강제 재탐색 | "
+                        f"changed_cells={len(changed_cells)} "
+                        f"new_path_points={len(self.current_path)} "
+                        f"risky_detour={self.current_path_is_risky} "
+                        f"pos={current_position} dest={destination_xz}"
+                    )
 
                     return {
                         "status": "forced_replan_no_history",
@@ -1447,7 +1524,10 @@ class TankDriveController:
 
                 self.current_path = retreat_path
                 self.current_path_is_risky = False
-                self.vehicle_mode = 'retreat'
+                self._set_vehicle_mode(
+                    'retreat',
+                    reason="_handle_obstacle_change: standing_on_blocked_cell",
+                )
                 self._pivoting = False
                 self.speed_pid.reset()
                 self.steering_pid.reset()
@@ -1455,6 +1535,9 @@ class TankDriveController:
                 print(
                     f"[_handle_obstacle_change] 후퇴 경로 재생성됨(진행 중 재탐지) "
                     f"-> {len(retreat_path)}개 지점, 새 목표={retreat_path[-1]}"
+                )
+                self._log_retreat_path_saved(
+                    retreat_path, source="_handle_obstacle_change"
                 )
 
                 return {
@@ -1478,7 +1561,10 @@ class TankDriveController:
 
                 self.current_path = new_path or []
                 self.current_path_is_risky = bool(new_path) and is_risky
-                self.vehicle_mode = 'advance'
+                self._set_vehicle_mode(
+                    'advance',
+                    reason="_handle_obstacle_change: path blocked but standing cell clear -> replan",
+                )
                 self._pivoting = False
 
                 return {
@@ -1999,7 +2085,7 @@ class TankDriveController:
 
         # 새 episode에서는 이전 episode의 breadcrumb/후퇴 상태가
         # 섞이지 않도록 항상 advance로 초기화한다.
-        self.vehicle_mode = 'advance'
+        self._set_vehicle_mode('advance', reason="initialize() episode reset")
         self._pivoting = False
         self.current_path_is_risky = False
         self.position_history = []
@@ -2062,7 +2148,7 @@ class TankDriveController:
         ]
 
         # 새 목적지가 들어오면 후퇴 중이었더라도 전진 상태로 복귀한다.
-        self.vehicle_mode = 'advance'
+        self._set_vehicle_mode('advance', reason="apply_destination() new destination")
         self._pivoting = False
         self.current_path_is_risky = False
 
@@ -2323,7 +2409,13 @@ class TankDriveController:
             # Unity 쪽 /update_obstacle로 전체 장애물 목록이 새로 온 경우이므로
             # 자체 인지 기반 후퇴 중이었더라도 전진 상태로 복귀해 새 맵 기준으로
             # 다시 계획한다.
-            self.vehicle_mode = 'advance'
+            # 주의: 이 지점은 후퇴 도중이라도 무조건 advance로 강제 전환한다
+            # -> 후퇴가 끝나기도 전에 끊기고 다시 전진하는 것처럼 보이는
+            # 증상의 유력한 원인 후보이므로 반드시 로그를 남긴다.
+            self._set_vehicle_mode(
+                'advance',
+                reason="handle_update_obstacles(): /update_obstacle received (forced, even mid-retreat)",
+            )
             self._pivoting = False
 
             try:
@@ -2861,6 +2953,8 @@ class TankDriveController:
         Returns:
             시뮬레이터에 보낼 command dictionary.
         """
+
+        # 0. 강제 정지 플래그 
         if self.stop_flag:
             self.stop_flag = False
             return {
@@ -2904,6 +2998,7 @@ class TankDriveController:
             )
         )
 
+        # 1. 위치 갱신 + breadcrumb 기록 + 후퇴 도착 체크
         # D* Lite grid 이동 여부를 판단하기 위해 직전 위치를 보존한다.
         previous_pos = self.current_pos
 
@@ -2917,6 +3012,7 @@ class TankDriveController:
         self._record_position_history(self.current_pos)
         self._check_retreat_arrival(self.current_pos, previous_pos)
 
+        # 2. 목적지, 속도, yaw 없으면 정지
         if self.dest is None:
             self.speed_pid.reset()
             self.steering_pid.reset()
@@ -2965,6 +3061,8 @@ class TankDriveController:
                 3,
             ),
         )
+
+        # 3. 목적지 변경되면 PID/도착 래치 리셋
 
         if (
             destination_signature
@@ -3017,6 +3115,10 @@ class TankDriveController:
             # 단, 후퇴 중(vehicle_mode == 'retreat')에는 grid가 바뀌어도
             # 전진 재탐색을 하지 않는다 -> retreat 경로가 그대로 유지된다.
             # (전진 복귀는 _check_retreat_arrival()이 도착 시점에 처리한다.)
+
+            # 4. D Lite 경로 갱신 
+            # 이 블록에서 find_path()가 ValueError를 던지면(= 시작점/목적지 자체가 장애물) 
+            # except ValueError 블록으로 가서 **여기가 바로 "후퇴 진입 지점 #1"**입니다
             if (
                 self.vehicle_mode == 'advance'
                 and (
@@ -3083,11 +3185,16 @@ class TankDriveController:
 
                     if retreat_path is not None:
                         self.current_path = retreat_path
-                        self.vehicle_mode = 'retreat'
+                        self._set_vehicle_mode(
+                            'retreat',
+                            reason="/get_action: find_path() failed & standing on blocked cell",
+                        )
                         print(
                             f"[/get_action] 발밑이 막혀서 후퇴 경로로 전환합니다 ({len(retreat_path)}개 지점)."
                         )
-                        print(f"[RETREAT PATH] points={retreat_path}")
+                        self._log_retreat_path_saved(
+                            retreat_path, source="/get_action"
+                        )
                     else:
                         self.current_path = (
                             self.planner._find_path_with_recovery(
@@ -3098,13 +3205,17 @@ class TankDriveController:
                             bool(self.current_path)
                             and self.planner.last_path_is_risky_detour
                         )
-                        self.vehicle_mode = 'advance'
+                        self._set_vehicle_mode(
+                            'advance',
+                            reason="/get_action: find_path() failed, standing on blocked cell, no retreat history -> forced replan",
+                        )
                         self._pivoting = False
 
                     if self.current_path:
                         self.speed_pid.reset()
                         self.steering_pid.reset()
 
+        # 5. 경로 없으면 정지
         if not self.current_path:
             self.speed_pid.reset()
             self.steering_pid.reset()
@@ -3116,6 +3227,7 @@ class TankDriveController:
 
             return make_stop_command()
 
+        # 6. 목적지까지 거리 계산, 조향 계산
         # ----------------------------------------------------
         # 2) 최종 목적지까지 거리
         # ----------------------------------------------------
@@ -3156,6 +3268,7 @@ class TankDriveController:
             ]
         )
 
+        # 7. 급선회 분기(피벗)
         # ----------------------------------------------------
         # 3-1) 급선회 구간: 감속과 회전을 분리한다
         # ----------------------------------------------------
@@ -3178,6 +3291,11 @@ class TankDriveController:
         if self._pivoting:
             if abs(heading_error_deg) <= self.PIVOT_EXIT_HEADING_ERROR_DEG:
                 # 방향이 충분히 맞춰졌다 -> 회전 종료, 정상 추종 재개.
+                print(
+                    f"[/get_action PIVOT] 제자리 회전 종료 | "
+                    f"heading_error={heading_error_deg:.2f}deg "
+                    f"vehicle_mode={self.vehicle_mode}"
+                )
                 self._pivoting = False
                 self.speed_pid.reset()
                 self.steering_pid.reset()
@@ -3190,6 +3308,7 @@ class TankDriveController:
                     f"[/get_action PIVOT] 제자리 회전 중 | "
                     f"heading_error={heading_error_deg:.2f}deg "
                     f"speed={current_speed_kmh:.2f}km/h "
+                    f"vehicle_mode={self.vehicle_mode} "
                     f"AD={pivot_command['moveAD']}"
                 )
 
@@ -3203,7 +3322,8 @@ class TankDriveController:
                 print(
                     f"[/get_action PIVOT] 급선회 필요, 감속 우선 | "
                     f"heading_error={heading_error_deg:.2f}deg "
-                    f"speed={current_speed_kmh:.2f}km/h"
+                    f"speed={current_speed_kmh:.2f}km/h "
+                    f"vehicle_mode={self.vehicle_mode}"
                 )
 
                 return brake_command
@@ -3221,6 +3341,7 @@ class TankDriveController:
                 f"[/get_action PIVOT] 제자리 회전 시작 | "
                 f"heading_error={heading_error_deg:.2f}deg "
                 f"speed={current_speed_kmh:.2f}km/h "
+                f"vehicle_mode={self.vehicle_mode} "
                 f"AD={pivot_command['moveAD']}"
             )
 
@@ -3257,6 +3378,7 @@ class TankDriveController:
             f"arrival_latched={self.arrival_latched}",
         )
 
+        # 8. 도착 반경 체크 (제동거리 계산)
         # 목적지 반경 진입 후에는 다시 일반 주행으로 돌아가지 않는다.
         if (
             self.arrival_latched
@@ -3314,6 +3436,7 @@ class TankDriveController:
 
             print(
                 f"[/get_action CTRL] {state} | "
+                f"vehicle_mode={self.vehicle_mode} "
                 f"pos=({pos_x:.2f},{pos_z:.2f}) "
                 f"dest=({self.dest[0]:.2f},{self.dest[1]:.2f}) "
                 f"distance={distance_to_goal:.2f}m "
@@ -3379,6 +3502,7 @@ class TankDriveController:
             else self.MAX_SPEED_KMH
         )
 
+        # 9. 정상 주행 (목적지 감속 + 코너 감속 + 정렬 감속 + 위험우회 감속 중 최솟값)
         # 목적지/코너/정렬/최고속도/위험우회 중 가장 낮은 값을 실제
         # 목표속도로 사용한다.
         target_speed_kmh = min(
@@ -3496,6 +3620,7 @@ class TankDriveController:
 
         print(
             f"[/get_action CTRL] {state} | "
+            f"vehicle_mode={self.vehicle_mode} "
             f"pos=({pos_x:.2f},{pos_z:.2f}) "
             f"dest=({self.dest[0]:.2f},{self.dest[1]:.2f}) "
             f"distance={distance_to_goal:.2f}m "
