@@ -1455,14 +1455,17 @@ class TankDriveController:
 
         분기:
             1) changed_cells가 비었다 -> 아무 것도 안 함.
-            2) current_path가 이 변경으로 안 막혔다 -> 아무 것도 안 함
-               (패딩만 반영되고 계속 원래 경로로 진행).
-            3) 막혔는데 지금 서 있는 칸은 안 막혔다 -> 그 자리에서
-               곧바로 (패딩 포함) 재탐색만 하고 advance 유지. 이게
-               "인식 -> 패딩 -> 패딩 포함 새 경로 -> 시행" 흐름이고,
-               STOP이 제대로 동작하는 지금은 이게 정상 케이스가 된다.
-            4) 막혔고 지금 서 있는 칸 자체가 막혔다 -> 드문 예외
-               케이스. 후퇴가 필요하다.
+            2) current_path도 안 막혔고 지금 서 있는 칸도 안 막혔다 ->
+               아무 것도 안 함(패딩만 반영되고 계속 원래 경로로 진행).
+            3) (경로 또는 지금 서 있는 칸이) 막혔는데 지금 서 있는 칸은
+               안 막혔다 -> 그 자리에서 곧바로 (패딩 포함) 재탐색만 하고
+               advance 유지. 이게 "인식 -> 패딩 -> 패딩 포함 새 경로 ->
+               시행" 흐름이고, STOP이 제대로 동작하는 지금은 이게 정상
+               케이스가 된다.
+            4) 지금 서 있는 칸 자체가 막혔다 -> 후퇴가 필요하다. 이건
+               저장된 경로 폴리라인이 안 막힌 것으로 나와도(조향 오차로
+               경로에서 살짝 벗어나 있었다면 그럴 수 있다) 항상 우선
+               확인한다.
 
         이 판단은 차량이 지금 이동 중이든 정지해 있든 상관없이 항상
         즉시 실행된다 — get_action()의 "grid가 바뀌었나" tick 체크에
@@ -1483,11 +1486,28 @@ class TankDriveController:
             }
 
         with self.planner_lock:
+            # 저장된 경로 폴리라인만 보는 is_path_blocked()는, 조향 오차나
+            # 코너링으로 전차가 그 이상적인 직선에서 살짝 벗어난 채로
+            # 장애물 밀집 구역을 지나가는 경우를 놓친다 — 경로 자체는
+            # "안 막혔다"고 나오는데 정작 전차가 서 있는 실제 좌표는
+            # 방금 들어온 패딩에 이미 덮여 있을 수 있다. 그 상태로 그냥
+            # 넘어가면, 다음 get_action() tick의 grid-변경 재탐색에서야
+            # (또는 그마저 없으면 계속 그 자리에 머물다가) 뒤늦게
+            # "시작 위치가 장애물에 포함됩니다" 예외로 발견돼서, 충돌한
+            # 적도 없는데 갑자기 후퇴하는 것처럼 보이는 원인이 된다.
+            # 그래서 저장된 경로와 무관하게 "지금 서 있는 칸 자체"도
+            # 항상 먼저 확인한다.
+            current_grid = self.planner.world_to_grid(
+                current_position, clamp=True,
+            )
+            standing_on_blocked_cell = not self.planner.is_free(current_grid)
+
             # current_path가 이미 비어있는 상태(예: 직전 재탐색 실패로 멈춰있는
             # 상황)도 '막힘'으로 간주해야 한다 — 그렇지 않으면 is_path_blocked()가
             # 빈 리스트에 대해 False를 반환해서 멈춰있는 차량을 그대로 방치한다.
             blocked = (
-                not self.current_path
+                standing_on_blocked_cell
+                or not self.current_path
                 or self.planner.is_path_blocked(self.current_path)
             )
 
@@ -1497,11 +1517,6 @@ class TankDriveController:
                     "path_blocked": False,
                     "changed_cells": len(changed_cells),
                 }
-
-            current_grid = self.planner.world_to_grid(
-                current_position, clamp=True,
-            )
-            standing_on_blocked_cell = not self.planner.is_free(current_grid)
 
             if standing_on_blocked_cell:
                 # 드문 예외 케이스: 지금 서 있는 자리 자체가 막혔다
@@ -2451,32 +2466,17 @@ class TankDriveController:
             self.current_pos is not None
             and self.dest is not None
         ):
-            # Unity 쪽 /update_obstacle로 전체 장애물 목록이 새로 온 경우이므로
-            # 자체 인지 기반 후퇴 중이었더라도 전진 상태로 복귀해 새 맵 기준으로
-            # 다시 계획한다.
-            # 주의: 이 지점은 후퇴 도중이라도 무조건 advance로 강제 전환한다
-            # -> 후퇴가 끝나기도 전에 끊기고 다시 전진하는 것처럼 보이는
-            # 증상의 유력한 원인 후보이므로 반드시 로그를 남긴다.
-            self._set_vehicle_mode(
-                'advance',
-                reason="handle_update_obstacles(): /update_obstacle received (forced, even mid-retreat)",
-            )
-            self._pivoting = False
-
-            try:
-                with self.planner_lock:
-                    self.current_path = self.planner.find_path(
-                        self.current_pos,
-                        self.dest,
-                        self.latest_info
-                    )
-
-            except ValueError as exc:
-                print(
-                    "D* Lite 재계획 실패:",
-                    exc,
-                )
-                self.current_path = []
+            # 예전에는 여기서 후퇴 도중이라도 무조건 vehicle_mode를
+            # 'advance'로 바꾸고 자체 find_path()만 한 번 시도했다 —
+            # 그게 실패하면(예: 지금 서 있는 칸이 이번 등록으로 막힘)
+            # 후퇴 경로도 안 만들고 그냥 current_path=[]로 비워버려서,
+            # 후퇴가 끝나기도 전에 뚝 끊기고 다음 tick에야 재발견되는
+            # 문제의 유력한 원인이었다.
+            # _handle_obstacle_change()는 "지금 서 있는 칸 자체가
+            # 막혔는지"까지 먼저 확인해서 필요하면 후퇴 경로를 만들고,
+            # 그게 아니면 현재 모드를 함부로 건드리지 않은 채 필요한
+            # 경우에만 재탐색한다 — 그 로직을 여기서도 그대로 재사용한다.
+            self._handle_obstacle_change(changed_cells)
 
             self.render_map(
                 "D* Lite Replanning"
