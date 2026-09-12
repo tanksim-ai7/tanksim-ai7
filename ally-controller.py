@@ -131,11 +131,24 @@ def info():
     if enemy_hit_count < 2:
         if ALLY_DEST_IDX <= len(ALLY_DEST_LIST):
             if ALLY_DEST_IDX == 0:
-                dest = {
-                    "destination": f"{ALLY_DEST_LIST[ALLY_DEST_IDX][0]}, {data['playerPos']['y']}, {ALLY_DEST_LIST[ALLY_DEST_IDX][1]}"
-                }
-                ALLY_DEST_IDX += 1
-                drive_controller.handle_set_destination(dest)
+                # 경쟁 상태(race condition) 방지: /init(진짜 스폰 위치로
+                # 재배치)과 첫 /update_obstacle(장애물 등록)이 아직 안
+                # 끝났으면 첫 목적지 설정을 보류한다. 여기서 그냥 진행하면
+                # "직전 세션의 마지막 위치"나 "텅 빈 지도" 기준으로 첫
+                # 경로가 잘못 짜여서 시작하자마자 이상한 경로로 새는
+                # 문제가 재발한다. ALLY_DEST_IDX를 올리지 않으므로 다음
+                # /info에서 다시 시도한다.
+                if not drive_controller.is_ready_for_first_destination():
+                    print(
+                        "[/info] 첫 목적지 설정 보류 -> /init 또는 첫 "
+                        "장애물 등록이 아직 안 끝남"
+                    )
+                else:
+                    dest = {
+                        "destination": f"{ALLY_DEST_LIST[ALLY_DEST_IDX][0]}, {data['playerPos']['y']}, {ALLY_DEST_LIST[ALLY_DEST_IDX][1]}"
+                    }
+                    ALLY_DEST_IDX += 1
+                    drive_controller.handle_set_destination(dest)
             elif ALLY_DEST_LIST[ALLY_DEST_IDX-1][0]-1 <= data['playerPos']['x'] <= ALLY_DEST_LIST[ALLY_DEST_IDX-1][0]+1 and\
                  ALLY_DEST_LIST[ALLY_DEST_IDX-1][1]-1 <= data['playerPos']['z'] <= ALLY_DEST_LIST[ALLY_DEST_IDX-1][1]+1:
                 ALLY_DEST_LIST.append(path_planner.get_random_destination(data))

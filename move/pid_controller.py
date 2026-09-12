@@ -817,6 +817,22 @@ class TankDriveController:
         # D* Lite 경로 시각화 파일 경로.
         self.map_image_path = str(map_image_path)
 
+        # 시작 시퀀스 경쟁 상태(race condition) 방지용 준비 상태 플래그.
+        #
+        # 문제였던 상황: Unity 씬이 완전히 리셋되지 않은 채로 서버만 재시작되면,
+        # /init(진짜 스폰 위치로 재배치)이 처리되기 전에 첫 /info가 먼저 와서
+        # apply_destination()이 "직전 세션에서 남아있던 엉뚱한 위치"를 기준으로
+        # 첫 경로를 계산해버리는 사고가 있었다(그 뒤로 계속 이상한 경로를 감).
+        # initialize()가 실제로 호출돼 현재 위치가 신뢰할 수 있는 스폰 좌표로
+        # 확정되기 전까지는 첫 목적지 설정을 보류해야 하므로, 그 시점을
+        # 외부(ally-controller.py)에서 확인할 수 있게 플래그로 노출한다.
+        self.spawn_ready: bool = False
+
+        # 마찬가지로, 첫 /update_obstacle(장애물 등록)이 최소 한 번은 끝난
+        # 뒤에 첫 경로를 계산해야, 장애물이 하나도 반영 안 된 "텅 빈 지도"
+        # 기준으로 첫 경로가 잘못 짜이는 것도 함께 막을 수 있다.
+        self.obstacles_ready: bool = False
+
         # 현재 설정 목적지 [x, z] [m].
         self.dest: Optional[List[float]] = None
 
@@ -919,8 +935,27 @@ class TankDriveController:
         self._retreat_arrival_tolerance_m = 3.0  # 후퇴 목표점에 이만큼 가까워지면 후퇴 종료
 
     # --------------------------------------------------------
-    # 자체 인지(우리 쪽 파이프라인) 기반 회피/후퇴
+    # 시작 시퀀스 준비 상태 (race condition 방지)
     # --------------------------------------------------------
+
+    def is_ready_for_first_destination(self) -> bool:
+        """
+        첫 목적지를 지금 설정해도 안전한지 여부.
+
+        ally-controller.py의 /info 핸들러가 ALLY_DEST_IDX==0(첫 목적지
+        설정) 분기에서 이 메서드를 먼저 확인해야 한다. False가 나오면
+        이번 tick은 목적지 설정을 건너뛰고(ALLY_DEST_IDX도 올리지 않고)
+        다음 /info에서 다시 시도해야 한다.
+
+        두 조건을 모두 만족해야 True:
+            1) spawn_ready: /init(initialize())이 실제로 처리돼 현재
+               위치가 "직전 세션의 마지막 위치"가 아니라 신뢰할 수 있는
+               진짜 스폰 좌표로 확정됨.
+            2) obstacles_ready: 첫 /update_obstacle 등록이 최소 한 번은
+               끝나서, 장애물이 전혀 반영 안 된 빈 지도가 아닌 실제
+               장애물 기준으로 경로를 짤 수 있음.
+        """
+        return self.spawn_ready and self.obstacles_ready
 
     def _set_vehicle_mode(self, new_mode: str, reason: str) -> None:
         """
@@ -2083,6 +2118,12 @@ class TankDriveController:
 
         self.current_path = []
 
+        # 이 호출로 current_pos가 "신뢰할 수 있는 진짜 스폰 좌표"로 확정됐다.
+        # 이 전에 들어온 첫 목적지 설정 요청은 보류됐다가, 이 플래그가 서는
+        # 순간부터 실행돼야 한다 (그렇지 않으면 이전 episode의 마지막 위치
+        # 기준으로 첫 경로가 잘못 짜이는 문제가 재발한다).
+        self.spawn_ready = True
+
         # 새 episode에서는 이전 episode의 breadcrumb/후퇴 상태가
         # 섞이지 않도록 항상 advance로 초기화한다.
         self._set_vehicle_mode('advance', reason="initialize() episode reset")
@@ -2401,6 +2442,10 @@ class TankDriveController:
         changed_cells = self._update_obstacles_from_payload(
             data
         )
+
+        # 최소 한 번은 장애물 등록이 끝났다 -> 이제부터 계산되는 경로는
+        # "텅 빈 지도" 기준이 아니라 실제 장애물이 반영된 지도 기준이다.
+        self.obstacles_ready = True
 
         if (
             self.current_pos is not None
