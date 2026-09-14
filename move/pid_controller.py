@@ -814,6 +814,8 @@ class TankDriveController:
         # Flask threaded 모드에서 obstacle/path 갱신이 겹치지 않도록 planner 접근을 보호한다.
         self.planner_lock = threading.RLock()
 
+        self.obstacle_update_in_progress = False
+
         # D* Lite 경로 시각화 파일 경로.
         self.map_image_path = str(map_image_path)
 
@@ -949,118 +951,200 @@ class TankDriveController:
 
             if len(self.position_history) > self._history_max_points:
                 self.position_history.pop(0)
+# 원래코드
+    # def _check_retreat_arrival(
+    #     self,
+    #     current_position: Optional[Sequence[float]],
+    #     previous_position: Optional[Sequence[float]] = None,
+    # ) -> None:
+    #     """
+    #     후퇴 목표점(retreat 경로의 마지막 점)에 충분히 가까워졌는지 확인하고,
+    #     가까워졌으면 advance 모드로 복귀시켜 다음 tick부터 다시 목적지를
+    #     향해 전진 재탐색하게 한다.
+    #     """
+    #     if (
+    #         self.vehicle_mode != 'retreat'
+    #         or not self.current_path
+    #         or current_position is None
+    #     ):
+    #         return
 
+    #     retreat_target = self.current_path[-1]
+    #     retreat_start = self.current_path[0]
+
+    #     dist_to_retreat_target = math.hypot(
+    #         retreat_target[0] - current_position[0],
+    #         retreat_target[1] - current_position[1],
+    #     )
+
+    #     # "그 순간 이동 방향"이 아니라, 이 후퇴 경로 자체의
+    #     # 시작점(retreat_start) -> 목표점(retreat_target) 방향을 기준선으로
+    #     # 놓고, 현재 위치가 그 선을 따라 얼마나 진행했는지(progress)로
+    #     # 판정한다.
+    #     #
+    #     # 예전 버전(직전 tick -> 이번 tick 이동방향 기준 내적)의 문제:
+    #     # 후퇴가 막 시작돼서 아직 관성으로 원래 방향(예: retreat_target과
+    #     # 반대 방향)으로 계속 가고 있을 때도 "목표에서 멀어지는 중"이라는
+    #     # 이유로 즉시 passed_target=True가 나와버렸다(실측: 65m나 남은
+    #     # 시점에 통과 판정 -> 후퇴가 아예 시작도 안 됐는데 advance로
+    #     # 복귀 -> 그 자리에서 재탐색 실패 -> 비상탈출 경로가 맵 구석까지
+    #     # 직선으로 이어짐). progress 기준으로 바꾸면 순간적인 관성 방향과
+    #     # 무관하게, 실제로 시작점에서 목표점까지의 거리를 다 주파했을
+    #     # 때만(progress>=1.0) True가 된다.
+    #     passed_target = False
+    #     ref_dx = retreat_target[0] - retreat_start[0]
+    #     ref_dz = retreat_target[1] - retreat_start[1]
+    #     ref_len_sq = ref_dx * ref_dx + ref_dz * ref_dz
+    #     if ref_len_sq > 1e-6:
+    #         progress = (
+    #             (current_position[0] - retreat_start[0]) * ref_dx
+    #             + (current_position[1] - retreat_start[1]) * ref_dz
+    #         ) / ref_len_sq
+    #         passed_target = progress >= 1.0
+
+    #     print(
+    #         f"[RETREAT TRACK] pos={current_position} target={retreat_target} "
+    #         f"dist={dist_to_retreat_target:.2f}m tol={self._retreat_arrival_tolerance_m}m "
+    #         f"passed={passed_target}"
+    #     )
+        
+    #     if dist_to_retreat_target <= self._retreat_arrival_tolerance_m or passed_target:
+    #         self.vehicle_mode = 'advance'
+    #         self._pivoting = False
+
+    #         # retreat 중 그대로 유지되던 D* Lite 재계획 추적 상태를 지워서
+    #         # 다음 get_action() tick이 grid 변화 여부와 무관하게 무조건
+    #         # 한 번 새로 전진 경로를 계산하도록 만든다.
+    #         with self.planner_lock:
+    #             if hasattr(self.planner, "reset_replan_tracking"):
+    #                 self.planner.reset_replan_tracking()
+
+    #             if self.dest is not None:
+    #                 try:
+    #                     self.current_path = self.planner.find_path(
+    #                         current_position,
+    #                         self.dest,
+    #                         self.latest_info,
+    #                     )
+    #                 except ValueError as exc:
+    #                     print(
+    #                         "D* Lite 후퇴->전진 복귀 재계획 실패:",
+    #                         exc,
+    #                     )
+    #                     self.current_path = []
+
+    #                 if not self.current_path:
+    #                     # find_path()가 예외 없이 그냥 빈 경로만 반환하는
+    #                     # 경우(시작점/목적지 자체는 안 막혔는데 그 사이 경로가
+    #                     # 없는 경우 -- 예: 방금 재분류된 오브젝트의 거대한
+    #                     # 안전 반경이 두 지점 사이를 완전히 갈라놓은 경우).
+    #                     # 이건 ValueError가 안 나서 위 except로도 안 걸리고,
+    #                     # 그대로 두면 다음 tick에 또 find_path()를 불러도
+    #                     # 똑같이 빈 경로만 나오는 게 무한 반복된다.
+    #                     # clear_start_area로 점점 넓혀가며 재시도하는
+    #                     # _find_path_with_recovery()로 한 번 더 시도한다.
+    #                     print(
+    #                         "D* Lite 후퇴->전진 복귀: find_path()가 빈 경로를 "
+    #                         "반환함(시작/목적지 자체는 안 막혔지만 그 사이 경로가 "
+    #                         "없는 상태) -> 비상 탈출 재시도"
+    #                     )
+    #                     self.current_path = (
+    #                         self.planner._find_path_with_recovery(
+    #                             current_position, self.dest,
+    #                         )
+    #                     )
+
+    #         # 후퇴 경로 추종 중 쌓인 조향/속도 PID 오차가 새 전진 경로에
+    #         # 그대로 이어지면 튀는 값이 나올 수 있어 초기화한다.
+    #         self.speed_pid.reset()
+    #         self.steering_pid.reset()
+
+    #         # 후퇴->전진 복귀로 새로 짠 경로를 그래프 이미지에도 반영한다.
+    #         # (여기서 안 부르면 /update_obstacle 때 그린 낡은 그래프가
+    #         # 그대로 남아 실제 주행 경로와 어긋나 보인다.)
+    #         self.render_map("D* Lite Retreat Recovery")
+
+    #수정코드
     def _check_retreat_arrival(
         self,
         current_position: Optional[Sequence[float]],
         previous_position: Optional[Sequence[float]] = None,
-    ) -> None:
-        """
-        후퇴 목표점(retreat 경로의 마지막 점)에 충분히 가까워졌는지 확인하고,
-        가까워졌으면 advance 모드로 복귀시켜 다음 tick부터 다시 목적지를
-        향해 전진 재탐색하게 한다.
-        """
+    ) -> bool:
+
+
+    # 후퇴 중이 아니거나 필요한 값이 없으면 검사하지 않는다.
         if (
-            self.vehicle_mode != 'retreat'
+            self.vehicle_mode != "retreat"
             or not self.current_path
             or current_position is None
         ):
-            return
+            return False
 
         retreat_target = self.current_path[-1]
         retreat_start = self.current_path[0]
 
+        # 현재 위치와 후퇴 목표점 사이 거리
         dist_to_retreat_target = math.hypot(
             retreat_target[0] - current_position[0],
             retreat_target[1] - current_position[1],
         )
 
-        # "그 순간 이동 방향"이 아니라, 이 후퇴 경로 자체의
-        # 시작점(retreat_start) -> 목표점(retreat_target) 방향을 기준선으로
-        # 놓고, 현재 위치가 그 선을 따라 얼마나 진행했는지(progress)로
-        # 판정한다.
-        #
-        # 예전 버전(직전 tick -> 이번 tick 이동방향 기준 내적)의 문제:
-        # 후퇴가 막 시작돼서 아직 관성으로 원래 방향(예: retreat_target과
-        # 반대 방향)으로 계속 가고 있을 때도 "목표에서 멀어지는 중"이라는
-        # 이유로 즉시 passed_target=True가 나와버렸다(실측: 65m나 남은
-        # 시점에 통과 판정 -> 후퇴가 아예 시작도 안 됐는데 advance로
-        # 복귀 -> 그 자리에서 재탐색 실패 -> 비상탈출 경로가 맵 구석까지
-        # 직선으로 이어짐). progress 기준으로 바꾸면 순간적인 관성 방향과
-        # 무관하게, 실제로 시작점에서 목표점까지의 거리를 다 주파했을
-        # 때만(progress>=1.0) True가 된다.
-        passed_target = False
+        # 후퇴 경로 시작점에서 목표점까지의 진행률 계산
         ref_dx = retreat_target[0] - retreat_start[0]
         ref_dz = retreat_target[1] - retreat_start[1]
         ref_len_sq = ref_dx * ref_dx + ref_dz * ref_dz
+
+        progress = 0.0
+        passed_target = False
+
         if ref_len_sq > 1e-6:
             progress = (
                 (current_position[0] - retreat_start[0]) * ref_dx
                 + (current_position[1] - retreat_start[1]) * ref_dz
             ) / ref_len_sq
+
             passed_target = progress >= 1.0
 
         print(
-            f"[RETREAT TRACK] pos={current_position} target={retreat_target} "
-            f"dist={dist_to_retreat_target:.2f}m tol={self._retreat_arrival_tolerance_m}m "
+            f"[RETREAT TRACK] "
+            f"pos={current_position} "
+            f"target={retreat_target} "
+            f"dist={dist_to_retreat_target:.2f}m "
+            f"tol={self._retreat_arrival_tolerance_m:.2f}m "
+            f"progress={progress:.3f} "
             f"passed={passed_target}"
         )
-        
-        if dist_to_retreat_target <= self._retreat_arrival_tolerance_m or passed_target:
-            self.vehicle_mode = 'advance'
-            self._pivoting = False
 
-            # retreat 중 그대로 유지되던 D* Lite 재계획 추적 상태를 지워서
-            # 다음 get_action() tick이 grid 변화 여부와 무관하게 무조건
-            # 한 번 새로 전진 경로를 계산하도록 만든다.
-            with self.planner_lock:
-                if hasattr(self.planner, "reset_replan_tracking"):
-                    self.planner.reset_replan_tracking()
+        retreat_completed = (
+            dist_to_retreat_target <= self._retreat_arrival_tolerance_m
+            or passed_target
+        )
 
-                if self.dest is not None:
-                    try:
-                        self.current_path = self.planner.find_path(
-                            current_position,
-                            self.dest,
-                            self.latest_info,
-                        )
-                    except ValueError as exc:
-                        print(
-                            "D* Lite 후퇴->전진 복귀 재계획 실패:",
-                            exc,
-                        )
-                        self.current_path = []
+        if not retreat_completed:
+            return False
 
-                    if not self.current_path:
-                        # find_path()가 예외 없이 그냥 빈 경로만 반환하는
-                        # 경우(시작점/목적지 자체는 안 막혔는데 그 사이 경로가
-                        # 없는 경우 -- 예: 방금 재분류된 오브젝트의 거대한
-                        # 안전 반경이 두 지점 사이를 완전히 갈라놓은 경우).
-                        # 이건 ValueError가 안 나서 위 except로도 안 걸리고,
-                        # 그대로 두면 다음 tick에 또 find_path()를 불러도
-                        # 똑같이 빈 경로만 나오는 게 무한 반복된다.
-                        # clear_start_area로 점점 넓혀가며 재시도하는
-                        # _find_path_with_recovery()로 한 번 더 시도한다.
-                        print(
-                            "D* Lite 후퇴->전진 복귀: find_path()가 빈 경로를 "
-                            "반환함(시작/목적지 자체는 안 막혔지만 그 사이 경로가 "
-                            "없는 상태) -> 비상 탈출 재시도"
-                        )
-                        self.current_path = (
-                            self.planner._find_path_with_recovery(
-                                current_position, self.dest,
-                            )
-                        )
+        # 후퇴 완료 처리
+        self.vehicle_mode = "advance"
+        self._pivoting = False
 
-            # 후퇴 경로 추종 중 쌓인 조향/속도 PID 오차가 새 전진 경로에
-            # 그대로 이어지면 튀는 값이 나올 수 있어 초기화한다.
-            self.speed_pid.reset()
-            self.steering_pid.reset()
+        with self.planner_lock:
+            if hasattr(self.planner, "reset_replan_tracking"):
+                self.planner.reset_replan_tracking()
 
-            # 후퇴->전진 복귀로 새로 짠 경로를 그래프 이미지에도 반영한다.
-            # (여기서 안 부르면 /update_obstacle 때 그린 낡은 그래프가
-            # 그대로 남아 실제 주행 경로와 어긋나 보인다.)
-            self.render_map("D* Lite Retreat Recovery")
+            # 다음 get_action()에서 전진 경로를 새로 계산하게 한다.
+            self.current_path = []
+
+        # 후퇴 경로에서 누적된 PID 상태 제거
+        self.speed_pid.reset()
+        self.steering_pid.reset()
+
+        print(
+            "[RETREAT COMPLETE] "
+            "후퇴 완료 -> 먼저 정지, "
+            "다음 get_action에서 전진 경로 재계산"
+        )
+
+        return True
 
     def _build_retreat_path(
         self,
@@ -1212,6 +1296,15 @@ class TankDriveController:
             새 오브젝트"를 다뤄야 하는 상황이 생기면 이 부분을 다시
             설계해야 한다.)
         """
+        if self.obstacle_update_in_progress:
+            print(
+                "[_process_objects_detected] "
+                "장애물 갱신이 이미 진행 중 -> 중복 탐지 처리 생략"
+            )
+            return
+
+        self.obstacle_update_in_progress = True
+
         try:
             risky = [d for d in detections if len(d) >= 4 and d[3] == 'Tank1']
             if risky and self.vehicle_mode != 'retreat':
@@ -1248,12 +1341,12 @@ class TankDriveController:
             # 안 바뀐 것으로 보이더라도(예전 버그) 여기서 즉시 처리한다.
             if changed_cells:
                 self._handle_obstacle_change(changed_cells)
-
         except Exception as exc:
             # 백그라운드 스레드라 예외가 호출자에게 안 올라간다. 콘솔에
             # 남겨서 조용히 묻히지 않게 한다.
             print(f"[_process_objects_detected] 처리 실패: {exc}")
-
+        finally :
+                    self.obstacle_update_in_progress = False
     def handle_object_detected(
         self,
         x_min: float,
@@ -2812,32 +2905,77 @@ class TankDriveController:
             "fire": False,
         }
 
-    def _make_brake_only_command(self) -> Dict[str, Any]:
-        """
-        moveAD 없이 moveWS만 'S', weight=1.0으로 걸어서 순수 감속시킨다.
+    # 기존 함수
+    # def _make_brake_only_command(self) -> Dict[str, Any]:
+    #     """
+    #     moveAD 없이 moveWS만 'S', weight=1.0으로 걸어서 순수 감속시킨다.
 
-        후퇴 중 heading_error가 커서 제자리 회전이 필요한데 아직
-        속도가 남아있을 때 쓴다. 브레이크와 조향을 동시에 최대로
-        걸면(기존 방식) 속도가 죽는 동안 넓은 반경으로 도는 원호가
-        나오므로, 그 원호 자체를 없애기 위해 이 구간에서는 조향을
-        아예 0으로 묶어둔다.
+    #     후퇴 중 heading_error가 커서 제자리 회전이 필요한데 아직
+    #     속도가 남아있을 때 쓴다. 브레이크와 조향을 동시에 최대로
+    #     걸면(기존 방식) 속도가 죽는 동안 넓은 반경으로 도는 원호가
+    #     나오므로, 그 원호 자체를 없애기 위해 이 구간에서는 조향을
+    #     아예 0으로 묶어둔다.
 
-        Returns:
-            Flask 서버가 그대로 jsonify할 수 있는 command dictionary.
-        """
+    #     Returns:
+    #         Flask 서버가 그대로 jsonify할 수 있는 command dictionary.
+    #     """
+    #     return {
+    #         "moveWS": {
+    #             "command": "S",
+    #             "weight": 1.0,
+    #         },
+    #         "moveAD": {
+    #             "command": "",
+    #             "weight": 0.0,
+    #         },
+    #         "turretQE": {"command": "", "weight": 0.0},
+    #         "turretRF": {"command": "", "weight": 0.0},
+    #         "fire": False,
+    #     }
+    def _make_brake_only_command(
+        self,
+        signed_speed_kmh: Optional[float],
+    ) -> Dict[str, Any]:
+   
+
+        should_apply_s_brake = (
+            signed_speed_kmh is None
+            or signed_speed_kmh > self.PIVOT_MAX_ENTRY_SPEED_KMH
+        )
+
+        ws_command = (
+            "S"
+            if should_apply_s_brake
+            else "STOP"
+        )
+
+        print(
+            "[PIVOT BRAKE]",
+            f"signed_speed={signed_speed_kmh}",
+            f"threshold={self.PIVOT_MAX_ENTRY_SPEED_KMH:.2f}km/h",
+            f"WS={ws_command}",
+        )
+
         return {
             "moveWS": {
-                "command": "S",
+                "command": ws_command,
                 "weight": 1.0,
             },
             "moveAD": {
                 "command": "",
                 "weight": 0.0,
             },
-            "turretQE": {"command": "", "weight": 0.0},
-            "turretRF": {"command": "", "weight": 0.0},
+            "turretQE": {
+                "command": "",
+                "weight": 0.0,
+            },
+            "turretRF": {
+                "command": "",
+                "weight": 0.0,
+            },
             "fire": False,
         }
+
 
     # --------------------------------------------------------
     # /get_action
@@ -2861,6 +2999,16 @@ class TankDriveController:
         Returns:
             시뮬레이터에 보낼 command dictionary.
         """
+        if self.obstacle_update_in_progress:
+            self.speed_pid.reset()
+            self.steering_pid.reset()
+
+            print(
+                "[/get_action STOP] "
+                "장애물 갱신 중 -> STOP 유지"
+            )
+
+            return make_stop_command()
         if self.stop_flag:
             self.stop_flag = False
             return {
@@ -2914,8 +3062,20 @@ class TankDriveController:
 
         # 자체 인지 기반 회피/후퇴 상태 갱신.
         # dest가 아직 없어도 breadcrumb 자체는 계속 쌓아 둔다.
+        # 기존코드
+        # self._record_position_history(self.current_pos)
+        # self._check_retreat_arrival(self.current_pos, previous_pos)
+        
+        #수정코드 
         self._record_position_history(self.current_pos)
-        self._check_retreat_arrival(self.current_pos, previous_pos)
+
+        retreat_completed = self._check_retreat_arrival(
+            self.current_pos,
+            previous_pos,
+        )
+
+        if retreat_completed:
+            return make_stop_command()
 
         if self.dest is None:
             self.speed_pid.reset()
@@ -3024,14 +3184,38 @@ class TankDriveController:
                     or not self.current_path
                 )
             ):
-                with self.planner_lock:
-                    self.current_path = (
-                        self.planner.find_path(
-                            self.current_pos,
-                            self.dest,
-                            self.latest_info
-                        )
+                    # 기존 코드
+                # with self.planner_lock:
+                #     self.current_path = (
+                #         self.planner.find_path(
+                #             self.current_pos,
+                #             self.dest,
+                #             self.latest_info
+                #         )
+                #     )
+
+                # 수정 본
+                planner_lock_acquired = self.planner_lock.acquire(blocking=False)
+
+                if not planner_lock_acquired:
+                    self.speed_pid.reset()
+                    self.steering_pid.reset()
+
+                    print(
+                        "[/get_action STOP] "
+                        "planner_lock 사용 중 -> 기다리지 않고 STOP 반환"
                     )
+
+                    return make_stop_command()
+
+                try:
+                    self.current_path = self.planner.find_path(
+                        self.current_pos,
+                        self.dest,
+                        self.latest_info,
+                    )
+                finally:
+                    self.planner_lock.release()
 
                     # 정상적으로 바로 찾은 경로다 -> 위험 우회 플래그 해제.
                     self.current_path_is_risky = False
@@ -3198,12 +3382,16 @@ class TankDriveController:
         elif abs(heading_error_deg) > self.PIVOT_ENTER_HEADING_ERROR_DEG:
             if current_speed_kmh > self.PIVOT_MAX_ENTRY_SPEED_KMH:
                 # 아직 속도가 안 죽었다 -> 조향 없이 순수 감속만.
-                brake_command = self._make_brake_only_command()
+                brake_command = self._make_brake_only_command(
+                    self.info_signed_speed_kmh,
+                )
 
                 print(
                     f"[/get_action PIVOT] 급선회 필요, 감속 우선 | "
                     f"heading_error={heading_error_deg:.2f}deg "
                     f"speed={current_speed_kmh:.2f}km/h"
+                    f"signed_speed={self.info_signed_speed_kmh}"
+                    f"WS={brake_command['moveWS']}"
                 )
 
                 return brake_command
