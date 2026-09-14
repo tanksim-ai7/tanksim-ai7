@@ -133,6 +133,20 @@
   #map-pane:hover, #logstrip > .strip-col:hover, #side > .sensor-box:hover{
     border-color:var(--amber);
   }
+  /* Draw inside every panel, above its contents, without intercepting input. */
+  .lime-hover-panel{ position:relative; }
+  .lime-hover-panel::after{
+    content:"";
+    position:absolute;
+    inset:0;
+    border:2px solid var(--amber);
+    border-radius:inherit;
+    pointer-events:none;
+    z-index:10;
+    opacity:0;
+    transition:opacity .28s var(--hover-ease);
+  }
+  .lime-hover-panel:hover::after{ opacity:1; }
   .expandable-panel.expanded{
     position:fixed !important; left:36px; right:36px; top:36px; bottom:36px;
     width:auto !important; height:auto !important; z-index:30;
@@ -236,6 +250,7 @@
     .sensor-head .t, .strip-head .t, #map-caption{
       transition:none;
     }
+    .lime-hover-panel::after{ transition:none; }
   }
 
   @media (max-width:1280px){
@@ -277,7 +292,7 @@
     <div id="leftcol">
 
       <!-- 좌상: 3D 경로맵 -->
-      <div id="map-pane" class="expandable-panel">
+      <div id="map-pane" class="expandable-panel lime-hover-panel">
         <iframe id="view3d" src="/view3d" title="3D 전장"></iframe>
         <div id="map-caption">3D 전장 · 경로 · 위협</div>
         <div id="map-readout">
@@ -297,7 +312,7 @@
       <!-- 하단 3분할 -->
       <div id="logstrip">
 
-        <div class="strip-col">
+        <div class="strip-col lime-hover-panel">
           <div class="strip-head">
             <span class="t">교전 로그</span>
             <span class="n mono" id="log-count">0</span>
@@ -307,7 +322,7 @@
           </div>
         </div>
 
-        <div class="strip-col">
+        <div class="strip-col lime-hover-panel">
           <div class="strip-head">
             <span class="t">실시간 상태</span>
             <span class="n mono" id="st-mode">--</span>
@@ -332,7 +347,7 @@
           </div>
         </div>
 
-        <div class="strip-col">
+        <div class="strip-col lime-hover-panel">
           <div class="strip-head">
             <span class="t">사격 정보</span>
             <span class="n mono" id="fc-env">--</span>
@@ -362,7 +377,7 @@
 
     <!-- 우측: 객체 인식 -->
     <div id="side">
-      <div class="sensor-box expandable-panel">
+      <div class="sensor-box expandable-panel lime-hover-panel">
         <div class="sensor-head">
           <span class="t">객체 인식</span>
           <span class="hint mono" id="det-count">0 DET</span>
@@ -374,7 +389,7 @@
         </div>
       </div>
 
-      <div class="sensor-box">
+      <div class="sensor-box lime-hover-panel">
         <div class="sensor-head">
           <span class="t">탐지 객체</span>
           <span class="hint mono">THREAT</span>
