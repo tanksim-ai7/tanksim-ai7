@@ -43,6 +43,8 @@ drive_controller = TankDriveController(path_planner)
 enemy_hit_count = 0
 pre_hit_time = None
 
+STOP_FLAG = False
+
 def send_to_5100(target_data, name):
     try:
         requests.post("http://127.0.0.1:5100/"+name, json=target_data, timeout=1)
@@ -176,6 +178,14 @@ def get_action():
         turretQE, turretRF, fire
     """
     # 이번 /get_action JSON snapshot.
+    if STOP_FLAG:
+        return {
+            "moveWS": {"command": "STOP", "weight": 1.0},
+            "moveAD": {"command": "", "weight": 0.0},
+            "turretQE": {"command": "", "weight": 0.0},
+            "turretRF": {"command": "", "weight": 0.0},
+            "fire": False
+        }
     data = request.get_json(force=True)
 
     # D* Lite + PID 차체 이동/조향 명령.
@@ -313,6 +323,15 @@ def start():
 from viz3d import attach_viz
 attach_viz(app, fm=fm, drive=drive_controller, detect=tskijun)
 
+@app.route('/get_emg_stop', methods=['POST'])
+def get_emg_stop():
+    global STOP_FLAG
+    if STOP_FLAG:
+        STOP_FLAG = False
+    else:
+        STOP_FLAG = True
+
+    return jsonify({"status": "OK", "message": "get_emg_stop signal received"})
 
 @app.route('/')
 def dashboard():

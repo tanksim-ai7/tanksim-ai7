@@ -2078,23 +2078,25 @@ class DStarPlanner:
             
             # 조건 A: 적의 z축 ±15 안쪽이 '아니어야' 함 (바깥쪽이어야 함)
             # 만약 x축도 바깥이어야 한다면 아래 주석 해제된 코드처럼 짤 수 있습니다.
-            is_outside_enemy_z = not (enemy_z - 15 <= cand_z <= enemy_z + 15)
-            is_outside_enemy_x = not (enemy_x - 15 <= cand_x <= enemy_x + 15)
+            # is_outside_enemy_z = not (enemy_z - 15 <= cand_z <= enemy_z + 15)
+            # is_outside_enemy_x = not (enemy_x - 15 <= cand_x <= enemy_x + 15)
+            is_outside_enemy = (enemy_x - 15 <= cand_x <= enemy_x + 15) and (enemy_z - 15 <= cand_z <= enemy_z + 15)
             
             # 조건 B: 현재 위치(playerPos)로부터 거리가 30 이상이어야 함
             dist_from_curr = math.sqrt((cand_x - curr_x)**2 + (cand_z - curr_z)**2)
-            is_far_enough = dist_from_curr >= 30
+            is_far_enough = dist_from_curr >= 35
 
             tmp = self.world_to_grid([cand_x, cand_z], clamp=True)
 
             if nxt != None:
-                is_outside_enemy_z2 = not (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
-                is_outside_enemy_x2 = not (nxt[0] - 15 <= cand_x <= nxt[0] + 15)
-                if is_outside_enemy_z2 and is_outside_enemy_x2 and is_outside_enemy_x and is_outside_enemy_z and is_far_enough and self.is_free(tmp):
+                # is_outside_enemy_z2 = not (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
+                # is_outside_enemy_x2 = not (nxt[0] - 15 <= cand_x <= nxt[0] + 15)
+                is_outside_enemy_2 = (nxt[0] - 15 <= cand_x <= nxt[0] + 15) and (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
+                if not is_outside_enemy_2 and not is_outside_enemy and is_far_enough and self.is_free(tmp):
                     return (cand_x, cand_z)
             else:
                 # 모든 조건을 충족하면 즉시 반환 (단조로움 해결!)
-                if is_outside_enemy_x and is_outside_enemy_z and is_far_enough and self.is_free(tmp):
+                if not is_outside_enemy and is_far_enough and self.is_free(tmp):
                     return (cand_x, cand_z)
 
 
