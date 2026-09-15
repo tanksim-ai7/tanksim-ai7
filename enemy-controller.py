@@ -21,8 +21,10 @@ fm = FireModule()
 
 NEXT_ALLY_DEST = None
 SEQ_FLAG = 'first'
-ENEMY_DEST_LIST = [(111.0, 172.0)]
+ENEMY_DEST_LIST = [(141.0, 162.0)]
 ENEMY_DEST_IDX = 0
+
+all_info = None
 
 @app.route('/init', methods=['POST'])
 def init():
@@ -33,9 +35,9 @@ def init():
         "blStartX": 60,
         "blStartY": 10,
         "blStartZ": 27.23,
-        "rdStartX": 111,
+        "rdStartX": 141,
         "rdStartY": 15,
-        "rdStartZ": 172,
+        "rdStartZ": 162,
         "trackingMode": True,
         "detectMode": False,
         "logMode": True,
@@ -48,7 +50,7 @@ def init():
         "destoryObstaclesOnHit": True,
     }
 
-    drive_controller.initialize(start_position=(111.0, 172.0))
+    drive_controller.initialize(start_position=(141.0, 162.0))
 
     return jsonify({"status": "success"}), 200
 
@@ -83,6 +85,8 @@ def info():
     data['enemyBodyZ'] = playerBodyZ
     data['enemyHealth'] = playerHealth
 
+    global all_info
+    all_info = data
     response, status = drive_controller.handle_info(data)
     
     # 원본 FireModule의 player/enemy/turret/target tracker 상태 갱신.
@@ -90,7 +94,7 @@ def info():
 
     global SEQ_FLAG, ENEMY_DEST_IDX, ENEMY_DEST_LIST
     if SEQ_FLAG == 'first':
-        if data['enemyPos']['z'] > 180.0 and ENEMY_DEST_IDX == 0:
+        if data['enemyPos']['z'] > 215.0 and ENEMY_DEST_IDX == 0:
             ENEMY_DEST_LIST.append((131.0, 250.0))
             ENEMY_DEST_IDX += 1
             dest = {
@@ -161,6 +165,7 @@ def get_action():
             my_vel=fire_inputs["my_vel"],
             body_rate_dps=fire_inputs["body_rate_dps"],
             hull_settled=fire_inputs["hull_settled"],
+            inhibit_fire= not fm._fire_allowed(all_info),
         )
 
         rst_cmd["turretQE"] = turret_cmd["turretQE"]

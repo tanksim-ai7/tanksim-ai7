@@ -18,7 +18,7 @@ matplotlib.use("Agg")
 app = Flask(__name__)
 
 SEQ_FLAG = 'first'
-ALLY_DEST_LIST = [(77.0, 281.20)]
+ALLY_DEST_LIST = [(130.0, 281.20)]
 ALLY_DEST_IDX = 0
 
 # YOLO 객체 인식 모델.
@@ -291,14 +291,14 @@ def init():
         "blStartX": 60,
         "blStartY": 10,
         "blStartZ": 27.23,
-        "rdStartX": 111,
+        "rdStartX": 141,
         "rdStartY": 15,
-        "rdStartZ": 172,
+        "rdStartZ": 162,
         "trackingMode": True,
-        "detectMode": False,
+        "detectMode": True,
         "logMode": True,
-        "stereoCameraMode": False,
-        "enemyTracking": False,
+        "stereoCameraMode": True,
+        "enemyTracking": True,
         "saveSnapshot": False,
         "saveLog": False,
         "saveLidarData": False,
