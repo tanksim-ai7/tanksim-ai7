@@ -32,9 +32,9 @@ def init():
     # 기존 통합 서버의 simulator config를 유지한다.
     config = {
         "startMode": "start",
-        "blStartX": 60,
+        "blStartX": 65,
         "blStartY": 10,
-        "blStartZ": 27.23,
+        "blStartZ": 77.23,
         "rdStartX": 141,
         "rdStartY": 15,
         "rdStartZ": 162,
@@ -94,7 +94,7 @@ def info():
 
     global SEQ_FLAG, ENEMY_DEST_IDX, ENEMY_DEST_LIST
     if SEQ_FLAG == 'first':
-        if data['enemyPos']['z'] > 215.0 and ENEMY_DEST_IDX == 0:
+        if data['enemyPos']['z'] > 200.0 and ENEMY_DEST_IDX == 0:
             ENEMY_DEST_LIST.append((131.0, 250.0))
             ENEMY_DEST_IDX += 1
             dest = {
