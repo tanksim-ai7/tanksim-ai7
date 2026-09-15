@@ -373,7 +373,8 @@ class FireModule:
                            my_vel: Vec3 = (0.0, 0.0, 0.0),
                            body_rate_dps: float = 0.0,
                            hull_settled: Optional[bool] = None,
-                           inhibit_fire: bool = True) -> Dict:
+                           inhibit_fire: bool = True,
+                           force_center : bool = False) -> Dict:
         """
         포탑 명령과 사격 여부만 반환한다. 이동 명령은 포함하지 않는다.
 
@@ -385,6 +386,11 @@ class FireModule:
         idle = {"turretQE": {"command": "", "weight": 0.0},
                 "turretRF": {"command": "", "weight": 0.0},
                 "fire": False}
+
+        if force_center:
+            if self.tm.my is None:
+                return idle
+            return self._build_turret_center_command()
         
         if not self.tm.ready:
             return idle
@@ -411,7 +417,7 @@ class FireModule:
         # 현재 거리에서 탄도해가 존재하지 않으면
         # 교전 상태가 아니므로 포탑을 차체 정면으로 복귀한다.
         if engagement_elevation is None:
-            return self._build_turret_center_command()
+            return idle
 
         if hull_settled is None:
             hull_settled = (self.tm.my_speed <= CFG["halt_speed"]

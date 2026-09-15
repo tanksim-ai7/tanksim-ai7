@@ -178,6 +178,8 @@ def get_action():
         turretQE, turretRF, fire
     """
     # 이번 /get_action JSON snapshot.
+    global SEQ_FLAG
+
     if STOP_FLAG:
         return {
             "moveWS": {"command": "STOP", "weight": 1.0},
@@ -191,7 +193,8 @@ def get_action():
     # D* Lite + PID 차체 이동/조향 명령.
     rst_cmd = drive_controller.get_action(data)
 
-    global SEQ_FLAG
+    turret_cmd = None
+
     if SEQ_FLAG == 'second':
         fire_inputs = (
             drive_controller.get_fire_control_inputs(
@@ -205,6 +208,11 @@ def get_action():
             inhibit_fire= not fm._fire_allowed(all_info),
         )
 
+    elif SEQ_FLAG == "third":
+        turret_cmd = fm.get_turret_command(
+            force_center=True
+        )
+    if turret_cmd is not None:
         rst_cmd["turretQE"] = turret_cmd["turretQE"]
         rst_cmd["turretRF"] = turret_cmd["turretRF"]
         rst_cmd["fire"] = turret_cmd["fire"]
