@@ -841,29 +841,16 @@ class DStarPlanner:
         서버 호출:
             current_path = planner.find_path(current_pos, dest)
         """
-
-        # self.movable_enemy_tank
-        # 움직일 수 있는 적 전차 위치에 대한 변수 업데이트
-        # if latest_info != None:
-        #     cx, cz = latest_info["enemyPos"]["x"], latest_info["enemyPos"]["z"]
-        #     body_angle = latest_info["enemyBodyX"]
-        #     turret_angle = latest_info["enemyTurretX"]
-
-        #     body_corners = self.get_bb_corners(cx, cz, 3.303, 6.339, body_angle)
-        #     turret_corners = self.get_bb_corners(cx, cz, 2.681, 2.822, turret_angle)
-
-        #     body_tiles = self.get_occupied_space(body_corners)
-        #     turret_tiles = self.get_occupied_space(turret_corners)
-
-        #     base_enemy_space = body_tiles.union(turret_tiles)
-
-        #     padded_enemy_space = set()
-        #     for x, z in base_enemy_space:
-        #         for dx in [-1, 0, 1]:
-        #             for dz in [-1, 0, 1]:
-        #                 padded_enemy_space.add((x + dx, z + dz))
-
-        #     self.movable_enemy_tank = padded_enemy_space
+        if latest_info != None:
+            tmp = self.world_to_grid((latest_info['enemyPos']['x'], latest_info['enemyPos']['z']), clamp=True)
+            enemy_tank_min_x = max(0, tmp[0]-5)
+            enemy_tank_max_x = min(299, tmp[0]+5)
+            enemy_tank_min_z = max(0, tmp[1]-5)
+            enemy_tank_max_z = min(299, tmp[1]+5)
+            self.movable_enemy_tank = set([])
+            for x in range(enemy_tank_min_x, enemy_tank_max_x+1):
+                for z in range(enemy_tank_min_z, enemy_tank_max_z+1):
+                    self.movable_enemy_tank.add((x, z))
 
         start = self.world_to_grid(current_pos, clamp=True)
         goal = self.world_to_grid(dest, clamp=True)
@@ -2065,10 +2052,10 @@ class DStarPlanner:
         enemy_z = data['enemyPos']['z']
 
         # 1. 플레이어 주변 및 맵 한계선을 고려한 '전체 가용 범위' 정의
-        x_min = max(0, curr_x - 30)
-        x_max = min(170, curr_x + 30)
+        x_min = max(10, curr_x - 30)
+        x_max = min(160, curr_x + 30)
         z_min = max(230, curr_z - 30)
-        z_max = min(300, curr_z + 30)
+        z_max = min(290, curr_z + 30)
 
         # 최대 3000번 무작위로 점을 던져서 조건을 만족하는지 검사
         for _ in range(3000):
@@ -2080,7 +2067,6 @@ class DStarPlanner:
             # 만약 x축도 바깥이어야 한다면 아래 주석 해제된 코드처럼 짤 수 있습니다.
             # is_outside_enemy_z = not (enemy_z - 15 <= cand_z <= enemy_z + 15)
             # is_outside_enemy_x = not (enemy_x - 15 <= cand_x <= enemy_x + 15)
-            is_outside_enemy = (enemy_x - 15 <= cand_x <= enemy_x + 15) and (enemy_z - 15 <= cand_z <= enemy_z + 15)
             
             # 조건 B: 현재 위치(playerPos)로부터 거리가 30 이상이어야 함
             dist_from_curr = math.sqrt((cand_x - curr_x)**2 + (cand_z - curr_z)**2)
@@ -2091,12 +2077,12 @@ class DStarPlanner:
             if nxt != None:
                 # is_outside_enemy_z2 = not (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
                 # is_outside_enemy_x2 = not (nxt[0] - 15 <= cand_x <= nxt[0] + 15)
-                is_outside_enemy_2 = (nxt[0] - 15 <= cand_x <= nxt[0] + 15) and (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
-                if not is_outside_enemy_2 and not is_outside_enemy and is_far_enough and self.is_free(tmp):
+                is_outside_enemy_2 = (nxt[0] - 5 <= cand_x <= nxt[0] + 5) and (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
+                if not is_outside_enemy_2 and is_far_enough and self.is_free(tmp):
                     return (cand_x, cand_z)
             else:
                 # 모든 조건을 충족하면 즉시 반환 (단조로움 해결!)
-                if not is_outside_enemy and is_far_enough and self.is_free(tmp):
+                if not is_far_enough and self.is_free(tmp):
                     return (cand_x, cand_z)
 
 

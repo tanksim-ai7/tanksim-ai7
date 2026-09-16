@@ -1508,7 +1508,8 @@ class TankDriveController:
                 # 드문 예외 케이스: 지금 서 있는 자리 자체가 막혔다
                 # (예: 바로 위에 갑자기 나타난 경우). 후퇴가 필요하다.
                 retreat_path = self._build_retreat_path()
-
+                retreat_path = self.planner.ultimate_one_pass_compression(retreat_path)
+                
                 if retreat_path is None:
                     # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
                     # 그 자리에서 강제 재탐색을 시도한다. _find_path_with_recovery()가
@@ -3262,32 +3263,33 @@ class TankDriveController:
                     current_grid,
                 )
 
-                if standing_on_blocked_cell:
-                    retreat_path = self._build_retreat_path()
+                # if standing_on_blocked_cell:
+                #     retreat_path = self._build_retreat_path()
+                #     retreat_path = self.planner.ultimate_one_pass_compression(retreat_path)
 
-                    if retreat_path is not None:
-                        self.current_path = retreat_path
-                        self.vehicle_mode = 'retreat'
-                        print(
-                            f"[/get_action] 발밑이 막혀서 후퇴 경로로 전환합니다 ({len(retreat_path)}개 지점)."
-                        )
-                        print(f"[RETREAT PATH] points={retreat_path}")
-                    else:
-                        self.current_path = (
-                            self.planner._find_path_with_recovery(
-                                self.current_pos, self.dest,
-                            )
-                        )
-                        self.current_path_is_risky = (
-                            bool(self.current_path)
-                            and self.planner.last_path_is_risky_detour
-                        )
-                        self.vehicle_mode = 'advance'
-                        self._pivoting = False
+                #     if retreat_path is not None:
+                #         self.current_path = retreat_path
+                #         self.vehicle_mode = 'retreat'
+                #         print(
+                #             f"[/get_action] 발밑이 막혀서 후퇴 경로로 전환합니다 ({len(retreat_path)}개 지점)."
+                #         )
+                #         print(f"[RETREAT PATH] points={retreat_path}")
+                #     else:
+                #         self.current_path = (
+                #             self.planner._find_path_with_recovery(
+                #                 self.current_pos, self.dest,
+                #             )
+                #         )
+                #         self.current_path_is_risky = (
+                #             bool(self.current_path)
+                #             and self.planner.last_path_is_risky_detour
+                #         )
+                #         self.vehicle_mode = 'advance'
+                #         self._pivoting = False
 
-                    if self.current_path:
-                        self.speed_pid.reset()
-                        self.steering_pid.reset()
+                #     if self.current_path:
+                #         self.speed_pid.reset()
+                #         self.steering_pid.reset()
 
         if not self.current_path:
             self.speed_pid.reset()
