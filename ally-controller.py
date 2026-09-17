@@ -296,9 +296,9 @@ def init():
     # 기존 통합 서버의 simulator config를 유지한다.
     config = {
         "startMode": "start",
-        "blStartX": 65,
+        "blStartX": 60,
         "blStartY": 10,
-        "blStartZ": 77.23,
+        "blStartZ": 27.23,
         "rdStartX": 141,
         "rdStartY": 15,
         "rdStartZ": 162,
@@ -315,7 +315,7 @@ def init():
     }
 
     # D* Lite/PID 내부 상태의 시작 위치 [x, z]를 simulator와 일치시킨다.
-    drive_controller.initialize(start_position=(65.0, 77.23))
+    drive_controller.initialize(start_position=(60.0, 27.23))
 
     threading.Thread(target=send_to_5100, args=(config, 'init'), daemon=True).start()
 

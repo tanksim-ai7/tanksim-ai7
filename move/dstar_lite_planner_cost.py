@@ -2043,14 +2043,14 @@ class DStarPlanner:
 
         return fig, ax
 
-    def get_random_destination(self, data, nxt=None):
+    def get_random_destination(self, data, nxt=None, x_min=10, x_max=75, z_min=240, z_max=290):
         curr_x = data['playerPos']['x']
         curr_z = data['playerPos']['z']
 
-        x_min = 10
-        x_max = 160
-        z_min = 240
-        z_max = 290
+        # x_min = 10
+        # x_max = 160
+        # z_min = 240
+        # z_max = 290
 
         for _ in range(3000):
             cand_x = random.uniform(x_min, x_max)

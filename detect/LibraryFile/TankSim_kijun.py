@@ -197,6 +197,8 @@ def scan_all_objects(target_classes, left_path="temp_left.jpg", right_path="temp
     right_detections, _, _ = run_inference(right_path)          # [NEW] 딱 1번만 추론
     
     for class_id, class_name in target_classes.items():
+        if class_name != 'Tank1':
+            continue
         left_boxes = filter_boxes_by_class(left_detections, class_id)     # [NEW] 재추론 없이 필터링만
         right_boxes = filter_boxes_by_class(right_detections, class_id)   # [NEW]
         

@@ -94,7 +94,7 @@ def info():
 
     global SEQ_FLAG, ENEMY_DEST_IDX, ENEMY_DEST_LIST
     if SEQ_FLAG == 'first':
-        if data['enemyPos']['z'] > 200.0 and ENEMY_DEST_IDX == 0:
+        if data['enemyPos']['z'] > 265.0 and ENEMY_DEST_IDX == 0:
             ENEMY_DEST_LIST.append((131.0, 250.0))
             ENEMY_DEST_IDX += 1
             dest = {
@@ -111,7 +111,7 @@ def info():
             if ENEMY_DEST_LIST[ENEMY_DEST_IDX-1][0]-1 <= data['playerPos']['x'] <= ENEMY_DEST_LIST[ENEMY_DEST_IDX-1][0]+1 and\
                ENEMY_DEST_LIST[ENEMY_DEST_IDX-1][1]-1 <= data['playerPos']['z'] <= ENEMY_DEST_LIST[ENEMY_DEST_IDX-1][1]+1:
 
-                ENEMY_DEST_LIST.append(path_planner.get_random_destination(data, NEXT_ALLY_DEST))
+                ENEMY_DEST_LIST.append(path_planner.get_random_destination(data, NEXT_ALLY_DEST, x_min=76, x_max=160))
                 dest = {
                     "destination": f"{ENEMY_DEST_LIST[ENEMY_DEST_IDX][0]}, {data['playerPos']['y']}, {ENEMY_DEST_LIST[ENEMY_DEST_IDX][1]}"
                 }

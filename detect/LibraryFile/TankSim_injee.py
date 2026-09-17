@@ -85,7 +85,7 @@ def detect():
             verbose=False,
             max_det=100
         )[0]
-
+        
         detections = []
 
         if result.boxes is not None:
@@ -106,6 +106,8 @@ def detect():
                     .cpu()
                     .item()
                 )
+                if confidence < 0.70:
+                    continue
 
                 x1, y1, x2, y2 = (
                     box.xyxy[0]
