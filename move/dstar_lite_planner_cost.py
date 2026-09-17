@@ -2045,44 +2045,28 @@ class DStarPlanner:
 
     def get_random_destination(self, data, nxt=None):
         curr_x = data['playerPos']['x']
-        curr_y = data['playerPos']['y']
         curr_z = data['playerPos']['z']
-        
-        enemy_x = data['enemyPos']['x']
-        enemy_z = data['enemyPos']['z']
 
-        # 1. 플레이어 주변 및 맵 한계선을 고려한 '전체 가용 범위' 정의
-        x_min = max(10, curr_x - 30)
-        x_max = min(160, curr_x + 30)
-        z_min = max(230, curr_z - 30)
-        z_max = min(290, curr_z + 30)
+        x_min = 10
+        x_max = 160
+        z_min = 240
+        z_max = 290
 
-        # 최대 3000번 무작위로 점을 던져서 조건을 만족하는지 검사
         for _ in range(3000):
-            # 전체 범위 안에서 완전히 자유롭게 점 추출
             cand_x = random.uniform(x_min, x_max)
             cand_z = random.uniform(z_min, z_max)
             
-            # 조건 A: 적의 z축 ±15 안쪽이 '아니어야' 함 (바깥쪽이어야 함)
-            # 만약 x축도 바깥이어야 한다면 아래 주석 해제된 코드처럼 짤 수 있습니다.
-            # is_outside_enemy_z = not (enemy_z - 15 <= cand_z <= enemy_z + 15)
-            # is_outside_enemy_x = not (enemy_x - 15 <= cand_x <= enemy_x + 15)
-            
-            # 조건 B: 현재 위치(playerPos)로부터 거리가 30 이상이어야 함
             dist_from_curr = math.sqrt((cand_x - curr_x)**2 + (cand_z - curr_z)**2)
-            is_far_enough = dist_from_curr >= 35
+            is_far_enough = dist_from_curr >= 30
 
             tmp = self.world_to_grid([cand_x, cand_z], clamp=True)
 
             if nxt != None:
-                # is_outside_enemy_z2 = not (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
-                # is_outside_enemy_x2 = not (nxt[0] - 15 <= cand_x <= nxt[0] + 15)
                 is_outside_enemy_2 = (nxt[0] - 5 <= cand_x <= nxt[0] + 5) and (nxt[1] - 15 <= cand_z <= nxt[1] + 15)
                 if not is_outside_enemy_2 and is_far_enough and self.is_free(tmp):
                     return (cand_x, cand_z)
             else:
-                # 모든 조건을 충족하면 즉시 반환 (단조로움 해결!)
-                if not is_far_enough and self.is_free(tmp):
+                if is_far_enough and self.is_free(tmp):
                     return (cand_x, cand_z)
 
 
