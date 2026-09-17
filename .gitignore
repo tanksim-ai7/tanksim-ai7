@@ -222,3 +222,6 @@ __marimo__/
 *.pt
 path_snapshots/
 
+*.png
+*.jpg
+*.jpeg
