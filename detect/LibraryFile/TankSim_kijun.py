@@ -1,4 +1,6 @@
 import detect.LibraryFile.TankSim as ts
+import cv2
+import numpy as np
 
 VERTICAL_FOV = 28.0  # deg, 기존과 동일 가정
 HORIZONTAL_FOV_STEREO = 47.81061
@@ -7,8 +9,10 @@ LATEST_INFO = {}
 # 좌표 오차 원인 파악용 디버그 로그 스위치.
 # True로 두면 compute_stereo_for_pair()의 중간 계산값(baseline/disparity/
 # depth/bearing 등)과 raw/smoothed world 좌표가 전부 콘솔에 찍힌다.
-# 원인 확인 끝나면 False로 돌려서 로그 양을 줄이면 된다.
-DEBUG_STEREO = True
+# [PERF] 매 프레임, 매 pair마다 여러 줄짜리 f-string을 만들고 print()로
+# stdout에 쓰는 것 자체가 threaded Flask 서버에서는 블로킹 비용이 크다.
+# 좌표 디버깅이 필요할 때만 True로 켜고, 평소 주행/전투 중에는 False로 둘 것.
+DEBUG_STEREO = False
 
 # 감지된 오브젝트의 이름, 좌표값을 전역변수로 list 저장
 DETECTED_OBJECTS_INFO = []
@@ -26,10 +30,6 @@ MAX_RELEVANT_DISTANCE = 100.0   # 이 거리를 넘으면 위협도 0에 수렴
 
 THREAT_PER = 0                  # 현재 눈(카메라)에 보이는 위협도 (위협도 관련)
 
-#app = Flask(__name__)
-#model = YOLO('best.pt')
-#print(model.names)
-
 # 오차값 줄이기 위한 변수 및 라이브러리
 from collections import defaultdict, deque
 import statistics as st
@@ -39,17 +39,35 @@ OUTLIER_THRESHOLD = 15.0   # 중앙값에서 이 거리(m) 이상 벗어나면 �
 MIN_SAMPLES_BEFORE_OUTPUT = 3   # 이 개수만큼 쌓이기 전엔 값을 내보내지 않음
 
 # 기능(함수) 모음 cell
-# [NEW] 이미지 하나당 YOLO 추론을 딱 1번만 실행 (클래스별로 재추론하지 않음)
-def run_inference(image_path):
-    results = ts.model(image_path, verbose=False)
-    img_h, img_w = results[0].orig_shape                # 이미지의 가로값, 세로 값을 도출
-                                                        # YOLO는 자체적으로 640x640으로 리사이징해서 처리함.
-                                                        # offset을 구하는공식에서 640을 그대로 써버리면 값이 error
-    detections = results[0].boxes.data.cpu().numpy()    # 이렇게 쓰면 YOLO가 도출한 값에 접근할수 있음
-    return detections, img_w, img_h
+
+# [PERF] Flask로 올라온 이미지를 디스크에 저장했다가 다시 읽는 대신,
+# 메모리에서 바로 디코딩한다.
+# 기존 방식(save -> YOLO가 다시 파일 열어서 read+decode -> os.remove)은
+# 좌/우 이미지 한 장당 write 1회 + read 1회 + delete 1회, 총 6회의
+# 디스크 I/O가 프레임마다 반복됐음. 이게 스테레오 카메라를 켰을 때만
+# 버벅이던 원인 중 하나.
+def decode_image_from_filestorage(file_storage):
+    file_bytes = np.frombuffer(file_storage.read(), np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    return img
 
 
-# [NEW] 이미 뽑아둔 추론 결과(detections)에서 원하는 클래스만 골라내기 (재추론 없음)
+# [PERF] 좌/우 이미지를 따로따로 두 번 추론하지 않고, 하나의 배치로 묶어서
+# YOLO를 한 번만 호출한다. ultralytics YOLO는 numpy 배열 리스트를 넣으면
+# 내부적으로 배치 추론을 수행하므로, 모델 forward pass 자체가
+# 2번 -> 1번으로 줄어들고 전/후처리 오버헤드도 절반 수준으로 줄어든다.
+# (이게 가장 큰 병목이었음 - 자세한 설명은 채팅 답변 참고)
+def run_inference_batch(left_img, right_img):
+    results = ts.model([left_img, right_img], verbose=False)
+    left_result, right_result = results[0], results[1]
+    img_h, img_w = left_result.orig_shape
+
+    left_detections = left_result.boxes.data.cpu().numpy()
+    right_detections = right_result.boxes.data.cpu().numpy()
+    return left_detections, right_detections, img_w, img_h
+
+
+# 이미 뽑아둔 추론 결과(detections)에서 원하는 클래스만 골라내기 (재추론 없음)
 def filter_boxes_by_class(detections, target_class_id):
     return [[float(c) for c in box[:4]] for box in detections if int(box[5]) == target_class_id]
 
@@ -189,24 +207,22 @@ def compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h):
 
     return {"world_pos": world_pos, "distance": distance_3d, "bearing": bearing}
 
-def scan_all_objects(target_classes, left_path="temp_left.jpg", right_path="temp_right.jpg"):
+def scan_all_objects(target_classes, left_img, right_img):
     # target_classes: {class_id: class_name, ...}
     all_objects = []
-    
-    left_detections, img_w, img_h = run_inference(left_path)    # [NEW] 딱 1번만 추론
-    right_detections, _, _ = run_inference(right_path)          # [NEW] 딱 1번만 추론
-    
+
+    # [PERF] 좌/우 이미지를 한 번의 배치 추론으로 처리 (기존: run_inference() 2번 호출)
+    left_detections, right_detections, img_w, img_h = run_inference_batch(left_img, right_img)
+
     for class_id, class_name in target_classes.items():
-        if class_name != 'Tank1':
-            continue
-        left_boxes = filter_boxes_by_class(left_detections, class_id)     # [NEW] 재추론 없이 필터링만
-        right_boxes = filter_boxes_by_class(right_detections, class_id)   # [NEW]
-        
+        left_boxes = filter_boxes_by_class(left_detections, class_id)     # 재추론 없이 필터링만
+        right_boxes = filter_boxes_by_class(right_detections, class_id)
+
         if not left_boxes or not right_boxes:
             continue
-        
+
         pairs = match_stereo_boxes(left_boxes, right_boxes)
-        
+
         for left_bbox, right_bbox in pairs:
             result = compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h)
             if result is None:
@@ -251,12 +267,12 @@ def distance_score(distance, max_relevant_distance=MAX_RELEVANT_DISTANCE):
         return 1.0
     score = 1 - (distance / max_relevant_distance)
     return max(0.0, min(1.0, score))
-    
+
 def firepower_score(class_name):
     # 화력을 0~1로 정규화. 값이 클수록 위험.
     fp = FIREPOWER_TABLE.get(class_name, 0)
     return fp / MAX_FIREPOWER if MAX_FIREPOWER > 0 else 0.0
-    
+
 def compute_threat_score(class_name, distance, w_class=0.5, w_distance=0.5):
     # 화력 등급 × 거리 점수
     return firepower_score(class_name) * distance_score(distance)
@@ -276,74 +292,33 @@ def total_threat_score(ranked_objects):
 
 def save_detected_object_info(objects):
     objects_info = []
-    
+
     print(f'탐지된 오브젝트 개수 : {len(objects)}')
     for obj in objects:
         object_info_pos = (obj['world_pos']['x'], obj['world_pos']['y'], obj['world_pos']['z'], obj['class_name'])
         objects_info.append(object_info_pos)
-    
+
     return objects_info
 
 
-
-# 여기부터 서버 통신 함수
-# def detect():
-#     image = ts.request.files.get('image')
-#     if not image:
-#         return ts.jsonify({"error": "No image received"}), 400
-
-#     image_path = 'temp_image.jpg'
-#     image.save(image_path)
-
-#     results = ts.model(image_path, verbose=False)
-#     detections = results[0].boxes.data.cpu().numpy()
-#     #print(results[0].boxes.data)
-#     #target_classes = {0: "human1",1: "human2"}
-#     target_classes = {
-#         0: 'Car', 
-#         1: 'House', 
-#         2: 'Human1', 
-#         3: 'Human2', 
-#         4: 'Human3', 
-#         5: 'Mine', 
-#         6: 'Rock', 
-#         7: 'Tank1', 
-#         8: 'Tank2', 
-#         9: 'Tent', 
-#         10: 'Tree', 
-#         11: 'Wall'
-#     }
-#     filtered_results = []
-#     for box in detections:
-#         class_id = int(box[5])
-#         if class_id in target_classes:
-#             filtered_results.append({
-#                 'className': target_classes[class_id],
-#                 'bbox': [float(coord) for coord in box[:4]],
-#                 'confidence': float(box[4]),
-#                 'color': '#00FF00',
-#                 'filled': False,
-#                 'updateBoxWhileMoving': False
-#             })
-#     return ts.jsonify(filtered_results)
-    
-def stereo_image():                             # 오브젝트 좌표, 위협도, 거리 계산은 다 여기서 실시.    
+# 여기부터 서버 통신 함수 (ally-controller.py가 tskijun.stereo_image() /
+# tskijun.info() / tskijun.DETECTED_OBJECTS_INFO 형태로 직접 호출하는 부분)
+def stereo_image():                             # 오브젝트 좌표, 위협도, 거리 계산은 다 여기서 실시.
     global THREAT_PER                           # (위협도 관련)
     global DETECTED_OBJECTS_INFO
-    
+
     left_image = ts.request.files.get('left_image')
     right_image = ts.request.files.get('right_image')
 
     if not left_image or not right_image:
         return ts.jsonify({"result": "error", "message": "Left or Right image missing"}), 400
 
-    req_id = ts.uuid.uuid4().hex   # [NEW] 요청마다 고유 ID
-    left_path = f"temp_left_{req_id}.jpg"     # [NEW]
-    right_path = f"temp_right_{req_id}.jpg"   # [NEW]
-    left_image.save(left_path)
-    right_image.save(right_path)
+    # [PERF] 디스크에 저장하지 않고 메모리에서 바로 디코딩 (아래 채팅 설명 참고)
+    left_img = decode_image_from_filestorage(left_image)
+    right_img = decode_image_from_filestorage(right_image)
 
-    #target_classes = {0: "human1", 1: "human2"}   # 나중에 실제 클래스로 확장
+    if left_img is None or right_img is None:
+        return ts.jsonify({"result": "error", "message": "Failed to decode image"}), 400
 
     if DEBUG_STEREO:
         print(
@@ -353,24 +328,15 @@ def stereo_image():                             # 오브젝트 좌표, 위협도
             f"stereoCameraLeftRot={LATEST_INFO.get('stereoCameraLeftRot')}"
         )
 
-    objects = scan_all_objects(ts.target_classes, left_path, right_path)
+    objects = scan_all_objects(ts.target_classes, left_img, right_img)
     ranked = rank_objects_by_threat(objects)
     DETECTED_OBJECTS_INFO = save_detected_object_info(objects)
     total = total_threat_score(ranked)          # 눈(카메라)에 보이는 위협도의 총합 (위협도 관련)
     THREAT_PER = total                          # 이 end point에서 나온 위협도를 전역변수에 저장 (위협도 관련)
     print(DETECTED_OBJECTS_INFO)
-    # print(f"[위험도 순위] 총 {len(ranked)}개 객체, 전체 위험도 합계: {total:.3f}")
-    # for i, obj in enumerate(ranked, 1):
-    #     print(f"  {i}순위 - {obj['class_name']}: 거리={obj['distance']:.1f}m, "
-    #           f"위험도={obj['threat_score']:.3f}, 위치={obj['world_pos']}")
 
-    # print(f"[스캔 결과] 총 {len(objects)}개 객체 탐지")
-    # for obj in objects:
-    #     print(f"  - {obj['class_name']}: 위치={obj['world_pos']}, 거리={obj['distance']:.1f}m")
-    ts.os.remove(left_path)
-    ts.os.remove(right_path)
     return ts.jsonify({"result": "success"})
-    
+
 def info():              # 내 위치값, 회전값등을 가져와야하기 때문에 여기서 LATEST_INFO에 로그데이터를 저장.
     # info는 Log Mode를 켜야만 작동이 되는 함수.
     global LATEST_INFO
@@ -381,96 +347,3 @@ def info():              # 내 위치값, 회전값등을 가져와야하기 때
     LATEST_INFO = data   # <- 추가   lidarRotation
 
     return ts.jsonify({"status": "success", "control": ""})
-
-
-def get_action():
-    data = ts.request.get_json(force=True)
-
-    position = data.get("position", {})
-    turret = data.get("turret", {})
-
-    pos_x = position.get("x", 0)
-    pos_y = position.get("y", 0)
-    pos_z = position.get("z", 0)
-
-    turret_x = turret.get("x", 0)
-    turret_y = turret.get("y", 0)
-
-    print(f"📨 Position received: x={pos_x}, y={pos_y}, z={pos_z}")
-    print(f"🎯 Turret received: x={turret_x}, y={turret_y}")
-
-    if combined_commands:
-        command = combined_commands.pop(0)
-    else:
-        command = {
-            "moveWS": {"command": "STOP", "weight": 1.0},
-            "moveAD": {"command": "", "weight": 0.0},
-            "turretQE": {"command": "", "weight": 0.0},
-            "turretRF": {"command": "", "weight": 0.0},
-            "fire": False
-        }
-
-    print("🔁 Sent Combined Action:", command)
-    return ts.jsonify(command)
-
-def update_bullet():
-    data = ts.request.get_json()
-    if not data:
-        return ts.jsonify({"status": "ERROR", "message": "Invalid request data"}), 400
-
-    print(f"💥 Bullet Impact at X={data.get('x')}, Y={data.get('y')}, Z={data.get('z')}, Target={data.get('hit')}")
-    return ts.jsonify({"status": "OK", "message": "Bullet impact data received"})
-
-
-def set_destination():
-    data = ts.request.get_json()
-    if not data or "destination" not in data:
-        return ts.jsonify({"status": "ERROR", "message": "Missing destination data"}), 400
-
-    try:
-        x, y, z = map(float, data["destination"].split(","))
-        print(f"🎯 Destination set to: x={x}, y={y}, z={z}")
-        return ts.jsonify({"status": "OK", "destination": {"x": x, "y": y, "z": z}})
-    except Exception as e:
-        return ts.jsonify({"status": "ERROR", "message": f"Invalid format: {str(e)}"}), 400
-
-
-def update_obstacle():
-    data = ts.request.get_json()
-    if not data:
-        return ts.jsonify({'status': 'error', 'message': 'No data received'}), 400
-    
-    print("🪨 Obstacle Data:", data)
-    return ts.jsonify({'status': 'success', 'message': 'Obstacle data received'})
-
-
-def collision():
-    data = ts.request.get_json()
-    if not data:
-        return ts.jsonify({'status': 'error', 'message': 'No collision data received'}), 400
-
-    object_name = data.get('objectName')
-    position = data.get('position', {})
-    x = position.get('x')
-    y = position.get('y')
-    z = position.get('z')
-
-    print(f"💥 Collision Detected - Object: {object_name}, Position: ({x}, {y}, {z})")
-
-    return ts.jsonify({'status': 'success', 'message': 'Collision data received'})
-
-#Endpoint called when the episode starts
-def init():
-    return ts.jsonify(config)
-
-def start():
-    return ts.jsonify({"control": ""})
-
-if __name__ == '__main__':
-    ts.app.run(
-        host="0.0.0.0",
-        port=5000,
-        threaded=True,
-        debug=False,
-        use_reloader=False
-    )
