@@ -1,4 +1,6 @@
 import detect.LibraryFile.TankSim as ts
+import io
+from PIL import Image
 
 VERTICAL_FOV = 28.0  # deg, 기존과 동일 가정
 HORIZONTAL_FOV_STEREO = 47.81061
@@ -40,13 +42,17 @@ MIN_SAMPLES_BEFORE_OUTPUT = 3   # 이 개수만큼 쌓이기 전엔 값을 내�
 
 # 기능(함수) 모음 cell
 # [NEW] 이미지 하나당 YOLO 추론을 딱 1번만 실행 (클래스별로 재추론하지 않음)
-def run_inference(image_path):
-    results = ts.model(image_path, verbose=False)
-    img_h, img_w = results[0].orig_shape                # 이미지의 가로값, 세로 값을 도출
-                                                        # YOLO는 자체적으로 640x640으로 리사이징해서 처리함.
-                                                        # offset을 구하는공식에서 640을 그대로 써버리면 값이 error
-    detections = results[0].boxes.data.cpu().numpy()    # 이렇게 쓰면 YOLO가 도출한 값에 접근할수 있음
-    return detections, img_w, img_h
+# def run_inference(image_path):
+#     results = ts.model(image_path, verbose=False)
+#     img_h, img_w = results[0].orig_shape                # 이미지의 가로값, 세로 값을 도출
+#                                                         # YOLO는 자체적으로 640x640으로 리사이징해서 처리함.
+#                                                         # offset을 구하는공식에서 640을 그대로 써버리면 값이 error
+#     detections = results[0].boxes.data.cpu().numpy()    # 이렇게 쓰면 YOLO가 도출한 값에 접근할수 있음
+#     return detections, img_w, img_h
+
+def run_inference(image_stream):
+    image_stream.seek(0)
+    img = Image.open(image_stream) 
 
 
 # [NEW] 이미 뽑아둔 추론 결과(detections)에서 원하는 클래스만 골라내기 (재추론 없음)
@@ -189,12 +195,65 @@ def compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h):
 
     return {"world_pos": world_pos, "distance": distance_3d, "bearing": bearing}
 
-def scan_all_objects(target_classes, left_path="temp_left.jpg", right_path="temp_right.jpg"):
+# def scan_all_objects(target_classes, left_path="temp_left.jpg", right_path="temp_right.jpg"):
+#     # target_classes: {class_id: class_name, ...}
+#     all_objects = []
+    
+#     left_detections, img_w, img_h = run_inference(left_path)    # [NEW] 딱 1번만 추론
+#     right_detections, _, _ = run_inference(right_path)          # [NEW] 딱 1번만 추론
+    
+#     for class_id, class_name in target_classes.items():
+#         if class_name != 'Tank1':
+#             continue
+#         left_boxes = filter_boxes_by_class(left_detections, class_id)     # [NEW] 재추론 없이 필터링만
+#         right_boxes = filter_boxes_by_class(right_detections, class_id)   # [NEW]
+        
+#         if not left_boxes or not right_boxes:
+#             continue
+        
+#         pairs = match_stereo_boxes(left_boxes, right_boxes)
+        
+#         for left_bbox, right_bbox in pairs:
+#             result = compute_stereo_for_pair(left_bbox, right_bbox, img_w, img_h)
+#             if result is None:
+#                 continue
+#             result["class_name"] = class_name
+
+#             # 스무딩 적용
+#             smoothed_pos = smooth_position(class_name, result["world_pos"])
+#             if smoothed_pos is None:                      #아직 안정화 안 됐으면 이번 프레임은 건너뜀
+#                 if DEBUG_STEREO:
+#                     print(
+#                         f"[STEREO DEBUG] {class_name}: 스무딩 샘플 부족으로 이번 프레임 스킵 "
+#                         f"(raw_world_pos={result['world_pos']})"
+#                     )
+#                 continue
+#             result["raw_world_pos"] = result["world_pos"]   # 원본값도 참고용으로 남겨둠
+#             result["world_pos"] = smoothed_pos
+
+#             if DEBUG_STEREO:
+#                 print(
+#                     f"[STEREO DEBUG] {class_name}: raw={result['raw_world_pos']} "
+#                     f"-> smoothed={smoothed_pos}"
+#                 )
+
+#             player_pos = LATEST_INFO.get("playerPos")
+#             if player_pos:
+#                 result["distance"] = ts.math.sqrt(
+#                     (player_pos["x"] - smoothed_pos["x"]) ** 2 +
+#                     (player_pos["y"] - smoothed_pos["y"]) ** 2 +
+#                     (player_pos["z"] - smoothed_pos["z"]) ** 2
+#                 )
+
+#             all_objects.append(result)
+#     return all_objects
+
+def scan_all_objects(target_classes, left_stream, right_stream):
     # target_classes: {class_id: class_name, ...}
     all_objects = []
     
-    left_detections, img_w, img_h = run_inference(left_path)    # [NEW] 딱 1번만 추론
-    right_detections, _, _ = run_inference(right_path)          # [NEW] 딱 1번만 추론
+    left_detections, img_w, img_h = run_inference(left_stream)    
+    right_detections, _, _ = run_inference(right_stream)
     
     for class_id, class_name in target_classes.items():
         if class_name != 'Tank1':
@@ -327,6 +386,50 @@ def save_detected_object_info(objects):
 #             })
 #     return ts.jsonify(filtered_results)
     
+# def stereo_image():                             # 오브젝트 좌표, 위협도, 거리 계산은 다 여기서 실시.    
+#     global THREAT_PER                           # (위협도 관련)
+#     global DETECTED_OBJECTS_INFO
+    
+#     left_image = ts.request.files.get('left_image')
+#     right_image = ts.request.files.get('right_image')
+
+#     if not left_image or not right_image:
+#         return ts.jsonify({"result": "error", "message": "Left or Right image missing"}), 400
+
+#     req_id = ts.uuid.uuid4().hex   # [NEW] 요청마다 고유 ID
+#     left_path = f"temp_left_{req_id}.jpg"     # [NEW]
+#     right_path = f"temp_right_{req_id}.jpg"   # [NEW]
+#     left_image.save(left_path)
+#     right_image.save(right_path)
+
+#     #target_classes = {0: "human1", 1: "human2"}   # 나중에 실제 클래스로 확장
+
+#     if DEBUG_STEREO:
+#         print(
+#             "[STEREO DEBUG] ==== /stereo_image 프레임 시작 ====\n"
+#             f"  playerPos={LATEST_INFO.get('playerPos')}  "
+#             f"stereoCameraLeftPos={LATEST_INFO.get('stereoCameraLeftPos')}  "
+#             f"stereoCameraLeftRot={LATEST_INFO.get('stereoCameraLeftRot')}"
+#         )
+
+#     objects = scan_all_objects(ts.target_classes, left_path, right_path)
+#     ranked = rank_objects_by_threat(objects)
+#     DETECTED_OBJECTS_INFO = save_detected_object_info(objects)
+#     total = total_threat_score(ranked)          # 눈(카메라)에 보이는 위협도의 총합 (위협도 관련)
+#     THREAT_PER = total                          # 이 end point에서 나온 위협도를 전역변수에 저장 (위협도 관련)
+#     print(DETECTED_OBJECTS_INFO)
+#     # print(f"[위험도 순위] 총 {len(ranked)}개 객체, 전체 위험도 합계: {total:.3f}")
+#     # for i, obj in enumerate(ranked, 1):
+#     #     print(f"  {i}순위 - {obj['class_name']}: 거리={obj['distance']:.1f}m, "
+#     #           f"위험도={obj['threat_score']:.3f}, 위치={obj['world_pos']}")
+
+#     # print(f"[스캔 결과] 총 {len(objects)}개 객체 탐지")
+#     # for obj in objects:
+#     #     print(f"  - {obj['class_name']}: 위치={obj['world_pos']}, 거리={obj['distance']:.1f}m")
+#     ts.os.remove(left_path)
+#     ts.os.remove(right_path)
+#     return ts.jsonify({"result": "success"})
+
 def stereo_image():                             # 오브젝트 좌표, 위협도, 거리 계산은 다 여기서 실시.    
     global THREAT_PER                           # (위협도 관련)
     global DETECTED_OBJECTS_INFO
@@ -337,13 +440,9 @@ def stereo_image():                             # 오브젝트 좌표, 위협도
     if not left_image or not right_image:
         return ts.jsonify({"result": "error", "message": "Left or Right image missing"}), 400
 
-    req_id = ts.uuid.uuid4().hex   # [NEW] 요청마다 고유 ID
-    left_path = f"temp_left_{req_id}.jpg"     # [NEW]
-    right_path = f"temp_right_{req_id}.jpg"   # [NEW]
-    left_image.save(left_path)
-    right_image.save(right_path)
-
-    #target_classes = {0: "human1", 1: "human2"}   # 나중에 실제 클래스로 확장
+    # 1. 파일 객체에서 바이너리 데이터 읽기 및 메모리 버퍼 생성
+    left_stream = io.BytesIO(left_image.read())
+    right_stream = io.BytesIO(right_image.read())
 
     if DEBUG_STEREO:
         print(
@@ -353,22 +452,13 @@ def stereo_image():                             # 오브젝트 좌표, 위협도
             f"stereoCameraLeftRot={LATEST_INFO.get('stereoCameraLeftRot')}"
         )
 
-    objects = scan_all_objects(ts.target_classes, left_path, right_path)
+    objects = scan_all_objects(ts.target_classes, left_stream, right_stream)
     ranked = rank_objects_by_threat(objects)
     DETECTED_OBJECTS_INFO = save_detected_object_info(objects)
     total = total_threat_score(ranked)          # 눈(카메라)에 보이는 위협도의 총합 (위협도 관련)
     THREAT_PER = total                          # 이 end point에서 나온 위협도를 전역변수에 저장 (위협도 관련)
     print(DETECTED_OBJECTS_INFO)
-    # print(f"[위험도 순위] 총 {len(ranked)}개 객체, 전체 위험도 합계: {total:.3f}")
-    # for i, obj in enumerate(ranked, 1):
-    #     print(f"  {i}순위 - {obj['class_name']}: 거리={obj['distance']:.1f}m, "
-    #           f"위험도={obj['threat_score']:.3f}, 위치={obj['world_pos']}")
-
-    # print(f"[스캔 결과] 총 {len(objects)}개 객체 탐지")
-    # for obj in objects:
-    #     print(f"  - {obj['class_name']}: 위치={obj['world_pos']}, 거리={obj['distance']:.1f}m")
-    ts.os.remove(left_path)
-    ts.os.remove(right_path)
+    
     return ts.jsonify({"result": "success"})
     
 def info():              # 내 위치값, 회전값등을 가져와야하기 때문에 여기서 LATEST_INFO에 로그데이터를 저장.
