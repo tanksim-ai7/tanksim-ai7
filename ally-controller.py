@@ -3,9 +3,9 @@ from ultralytics import YOLO
 from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 from move.pid_controller import TankDriveController
 from fire.fire_module import FireModule
-import detect.LibraryFile.TankSim as ts
-import detect.LibraryFile.TankSim_kijun as tskijun
-import detect.LibraryFile.TankSim_injee as tsinjee
+import detect.detection_server as ts
+import detect.stereo as tskijun
+import detect.detector as tsinjee
 import matplotlib
 import requests
 import threading
