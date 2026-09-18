@@ -1,4 +1,4 @@
-import detect.LibraryFile.TankSim as ts
+import detect.detection_server as ts
 import cv2
 import numpy as np
 
