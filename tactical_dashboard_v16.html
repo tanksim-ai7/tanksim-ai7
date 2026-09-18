@@ -5,421 +5,397 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>전술 통합 대시보드</title>
 <style>
+  /* 2026-09-18: 읽기 쉬운 글자와 3D 중심 배치 */
   :root{
-    --bg: #0c0d0f;
-    --bg-deep: #08090a;
-    --panel: #17181b;
-    --panel-2: #1d1f23;
-    --line: rgba(255,255,255,0.08);
-    --line-soft: rgba(255,255,255,0.05);
-    --amber: #d3fa3c;
-    --amber-dim: #5f7a1a;
-    --steel: #5b8cff;
-    --danger: #ff6b6b;
-    --good: #4fd67a;
-    --khaki: #8b9098;
-    --text: #f2f3f0;
-    --text-dim: #8b8d92;
-    --radius: 18px;
-    --font-ui: 'Inter','Segoe UI','Noto Sans KR',-apple-system,sans-serif;
-    --font-mono: 'Consolas','SFMono-Regular',ui-monospace,monospace;
-    --lime-soft: rgba(211,250,60,0.12);
-    --lime-rest: #2e331e;
-    --hover-ease: cubic-bezier(.22,1,.36,1);
+    color-scheme:dark;
+    --bg:#111317;
+    --bg-deep:#0b0d10;
+    --panel:#191c21;
+    --panel-2:#252a31;
+    --line:rgba(232,240,250,.16);
+    --line-soft:rgba(232,240,250,.09);
+    --amber:#d3fa3c;
+    --amber-dim:#829a2e;
+    --steel:#83adff;
+    --danger:#ff8585;
+    --good:#69e596;
+    --khaki:#b9c2cf;
+    --text:#f5f7fa;
+    --text-dim:#bec7d3;
+    --radius:14px;
+    --hover-ease:cubic-bezier(.4,0,.2,1);
   }
-  *{ box-sizing:border-box; margin:0; padding:0; }
-  html,body{ height:100%; background:var(--bg-deep); color:var(--text);
-    font-family:var(--font-ui);
-    overflow:hidden; }
-  .mono{ font-family:var(--font-mono); }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg-deep);color:var(--text);
+    font-family:'Noto Sans KR','Malgun Gothic','Apple SD Gothic Neo','Segoe UI',sans-serif;
+    font-size:14px;line-height:1.5;overflow:hidden}
+  button{font:inherit}
+  .mono{font-family:'Consolas','SFMono-Regular','Malgun Gothic',ui-monospace,monospace;
+    font-variant-numeric:tabular-nums}
+  #app{display:flex;flex-direction:column;height:100vh;height:100dvh;padding:12px;gap:12px}
 
-  #app{ display:flex; flex-direction:column; height:100vh; padding:14px; gap:14px; }
+  /* 높이를 줄인 상단 상태와 강조한 제목 */
+  #topbar{display:flex;align-items:stretch;background:var(--panel);
+    border:1px solid var(--line);border-radius:var(--radius);flex-shrink:0;min-height:68px}
+  .side{display:flex;align-items:center;gap:24px;padding:7px 20px;flex:1;min-width:0}
+  .side.enemy{justify-content:flex-end}
+  .hp-block{display:flex;flex-direction:column;gap:5px;min-width:180px;width:clamp(180px,16vw,300px)}
+  .hp-block .k,.spd-block .k{font-size:13px;font-weight:600;letter-spacing:.2px;color:var(--text-dim)}
+  .hp-bar{height:12px;border-radius:6px;background:#303640;overflow:hidden;border:1px solid var(--line)}
+  .hp-bar>i{display:block;height:100%;border-radius:5px;transition:width .35s var(--hover-ease)}
+  .hearts{display:flex;gap:8px;font-size:23px;line-height:1;height:24px;align-items:center}
+  .hearts.right{justify-content:flex-end}
+  .hearts span{transition:color .25s,transform .25s}
+  .hearts span.lost{transform:scale(.82)}
+  .spd-block{display:flex;flex-direction:column;justify-content:center;min-width:104px}
+  .spd-block .v{font-size:24px;line-height:1.3;font-weight:700;color:var(--text);white-space:nowrap}
+  .spd-block.right{text-align:right}
+  #center{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+    padding:6px 20px;flex-shrink:0;border-left:1px solid var(--line);border-right:1px solid var(--line)}
+  #center .ttl{font-size:22px;line-height:1.1;font-weight:800;letter-spacing:1.8px;color:var(--amber);white-space:nowrap}
+  #center-actions{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:nowrap}
+  #center-actions>*{flex-shrink:0;white-space:nowrap}
+  #linkstatus{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;
+    color:var(--text-dim);background:var(--panel-2);padding:3px 10px;border-radius:20px}
+  #linkstatus .dot{width:7px;height:7px;border-radius:50%;background:var(--text-dim)}
+  #linkstatus.live .dot{background:var(--good);box-shadow:0 0 6px var(--good);animation:pulse 1.6s infinite}
+  #linkstatus.live{color:var(--good)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  #hpmode{font-size:12px;line-height:1.35;color:var(--text-dim);background:transparent;
+    border:1px solid var(--line);border-radius:12px;padding:3px 10px;cursor:pointer;
+    transition:color .2s,border-color .2s}
+  #hpmode:hover{color:var(--amber);border-color:var(--amber)}
+  button:focus-visible{outline:2px solid var(--amber);outline-offset:3px}
 
-  /* ===== Top instrument bar ===== */
-  #topbar{ display:flex; align-items:stretch; background:var(--panel);
-    border:1px solid var(--line); border-radius:var(--radius);
-    flex-shrink:0; overflow-x:auto; }
-  #callsign{ display:flex; flex-direction:column; justify-content:center;
-    padding:10px 22px; flex-shrink:0; }
-  #callsign .label{ font-size:9px; letter-spacing:2px; color:var(--text-dim); }
-  #callsign .name{ font-size:16px; font-weight:800; letter-spacing:1px;
-    color:var(--amber); }
-  .instrument{ display:flex; flex-direction:column; justify-content:center;
-    padding:8px 18px; border-left:1px solid var(--line);
-    min-width:70px; flex-shrink:0; }
-  .instrument .k{ font-size:8.5px; letter-spacing:1.5px; color:var(--text-dim); }
-  .instrument .v{ font-size:15px; font-weight:700; color:var(--text);
-    font-variant-numeric:tabular-nums; }
-  .instrument .v.amber{ color:var(--amber); }
-  .instrument .v.danger{ color:var(--danger); }
-  .instrument .v.good{ color:var(--good); }
-  #topbar-spacer{ flex:1; min-width:12px; }
-  #linkstatus{ display:flex; align-items:center; gap:8px; margin:8px 14px;
-    padding:6px 14px; font-size:10px; color:var(--text-dim); flex-shrink:0;
-    background:var(--panel-2); border-radius:20px; }
-  #linkstatus .dot{ width:7px; height:7px; border-radius:50%;
-    background:var(--text-dim); }
-  #linkstatus.live .dot{ background:var(--good); box-shadow:0 0 6px var(--good);
-    animation:pulse 1.6s infinite; }
-  #linkstatus.live{ color:var(--good); }
-  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.4;} }
+  /* 3D 영역 유지, 오른쪽에는 넓힌 로그와 독립된 비상정지 칸을 배치한다. */
+  #main{flex:1;display:grid;gap:12px;min-height:0;min-width:0;
+    grid-template-columns:minmax(0,2.55fr) minmax(360px,1fr);
+    grid-template-rows:minmax(160px,1.4fr) minmax(110px,.55fr) minmax(0,1.8fr) 88px;
+    grid-template-areas:'map log' 'map detect' 'map fire' 'map emergency'}
+  #map-pane{grid-area:map;background:#0b1012}
+  #log-pane{grid-area:log}
+  #detect-pane{grid-area:detect}
+  #fire-pane{grid-area:fire}
+  #emergency-pane{grid-area:emergency}
+  .pane{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    display:flex;flex-direction:column;overflow:hidden;min-width:0;min-height:0;
+    transition:border-color .25s var(--hover-ease),box-shadow .25s var(--hover-ease)}
+  .pane:hover,.pane:focus-within{border-color:var(--amber);box-shadow:0 0 0 1px rgba(211,250,60,.12)}
+  .pane-head{display:flex;justify-content:space-between;align-items:center;gap:10px;
+    padding:10px 14px;background:var(--panel-2);border-bottom:1px solid var(--line-soft);flex-shrink:0}
+  .pane-head .t{font-size:15px;line-height:1.4;font-weight:700;letter-spacing:.15px;color:var(--text)}
+  .pane-head .n{font-size:12px;line-height:1.5;font-weight:700;color:var(--amber);
+    background:rgba(211,250,60,.13);padding:2px 9px;border-radius:10px;white-space:nowrap}
+  .pane-body{flex:1;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden;
+    position:relative;overscroll-behavior:contain;scrollbar-gutter:stable}
+  .pane-body:focus-visible{outline:2px solid var(--amber);outline-offset:-3px}
 
-  /* ===== Main layout =====
-     스케치 구조
-       좌상  3D 경로맵 (가장 크게)     우상  객체 인식 / 객체 목록
-       하단  로그 표시 · 실시간 상태 · 사격 정보
-  */
-  #main{ flex:1; display:flex; gap:14px; overflow:hidden; min-height:0; }
-  #leftcol{ display:flex; flex-direction:column; min-width:0; flex:1; gap:14px; }
+  /* iframe은 확대된 셀 전체를 채우며 CSS 배율로 글자를 축소하지 않는다. */
+  #map-pane>.pane-body{overflow:hidden;scrollbar-gutter:auto}
+  #view3d{width:100%;height:100%;border:0;display:block;background:var(--bg)}
+  #map-placeholder{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;
+    justify-content:center;gap:12px;color:var(--text-dim);font-size:15px;
+    background:var(--bg);text-align:center;padding:26px}
+  #map-placeholder .ph-icon{font-size:36px;color:var(--amber)}
+  #map-placeholder .ph-help{max-width:36em;font-size:14px;line-height:1.7}
+  #map-pane.demo #map-placeholder{display:flex}
+  #map-pane.demo #view3d{display:none}
 
-  /* ---- 3D map pane (카메라 페인과 같은 형식) ---- */
-  #map-pane{ position:relative; flex:1; min-height:0; background:#000;
-    overflow:hidden; border-radius:var(--radius); border:1px solid var(--line); }
-  #view3d{ width:100%; height:100%; border:0; display:block; background:var(--bg); }
-  #map-caption{ position:absolute; top:14px; left:14px; font-size:10.5px;
-    color:var(--text); background:rgba(12,13,15,0.65); backdrop-filter:blur(6px);
-    padding:6px 14px; border-radius:20px; }
-  #map-readout{ position:absolute; left:14px; bottom:14px; font-size:9.5px;
-    color:var(--text-dim); background:rgba(12,13,15,0.7); backdrop-filter:blur(6px);
-    padding:7px 12px; border-radius:12px; line-height:1.55; }
-  #map-readout b{ color:var(--steel); }
-  #map-readout .enemy b{ color:var(--danger); }
-  #map-placeholder{ position:absolute; inset:0; display:none;
-    flex-direction:column; align-items:center; justify-content:center; gap:10px;
-    color:var(--text-dim); font-size:12px; background:var(--bg); text-align:center; }
-  #map-placeholder .ph-icon{ font-size:32px; opacity:.4; }
-  #map-pane.demo #map-placeholder{ display:flex; }
-  #map-pane.demo #view3d,
-  #map-pane.demo #map-caption,
-  #map-pane.demo #map-readout{ display:none; }
+  /* 로그의 상세 내용은 다음 줄에 배치해 좁은 패널에서도 읽는다. */
+  .log-row{display:grid;grid-template-columns:minmax(44px,max-content) minmax(54px,max-content) minmax(0,1fr);
+    gap:3px 10px;align-items:start;padding:9px 14px;border-top:1px solid var(--line-soft);font-size:13px;line-height:1.55}
+  .log-row:first-child{border-top:0}
+  .log-row .no,.log-row .ts{color:var(--text-dim)}
+  .log-row .res{font-weight:700;text-align:right}
+  .log-row.hit .res{color:var(--good)}
+  .log-row.miss .res{color:var(--danger)}
+  .log-row .m{grid-column:1/-1;min-width:0;overflow-wrap:anywhere;color:var(--text-dim);font-variant-numeric:tabular-nums}
+  .log-row .m b{color:var(--text);font-weight:600}
+  .log-row.system{grid-template-columns:max-content minmax(0,1fr);align-items:baseline}
+  .log-row.system .no{display:none}
+  .log-row.system .m{grid-column:2;font-style:normal}
 
-  /* ---- Bottom strip ---- */
-  #logstrip{ height:220px; flex-shrink:0; display:grid;
-    grid-template-columns:1.3fr 1fr 1fr; gap:14px; }
-  .strip-col{ display:flex; flex-direction:column; min-width:0;
-    background:var(--panel); border:1px solid var(--line);
-    border-radius:var(--radius); overflow:hidden; }
-  .strip-head{ display:flex; justify-content:space-between; align-items:center;
-    padding:10px 16px; flex-shrink:0; }
-  .strip-head .t{ font-size:11px; letter-spacing:.5px; color:var(--text);
-    font-weight:700; }
-  .strip-head .n{ font-size:10.5px; color:var(--amber); font-weight:700;
-    background:var(--panel-2); padding:2px 9px; border-radius:12px; }
-  .strip-body{ flex:1; overflow-y:auto; }
+  /* 탐지·사격 정보: 좁아진 패널 안에서 값과 라벨을 선명하게 구분 */
+  .row{display:flex;justify-content:space-between;align-items:center;gap:12px;
+    padding:6px 14px;min-height:34px;border-top:1px solid var(--line-soft);font-size:14px;line-height:1.45}
+  .row:first-child{border-top:0}
+  .row .tag{display:flex;align-items:center;gap:8px;min-width:0;font-weight:500;overflow-wrap:anywhere}
+  .row .sw{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+  .row .m{color:var(--text-dim);text-align:right;font-variant-numeric:tabular-nums;flex-shrink:0}
+  .row .m b{color:var(--text);font-weight:700}
+  .row .m b.danger{color:var(--danger)}
+  .row .m b.amber{color:var(--amber)}
+  .uncertain{color:var(--text-dim);text-decoration:underline dotted;text-underline-offset:4px}
+  .empty{padding:14px;font-size:14px;color:var(--text-dim);font-style:normal}
+  /* 사격 정보의 항목과 수치를 같은 위치의 세로선으로 구분한다. */
+  #fire-pane .row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+    align-items:stretch;gap:0;padding:0;min-height:32px}
+  #fire-pane .row>.tag{padding:5px 14px}
+  #fire-pane .row>.m{display:flex;align-items:center;justify-content:flex-end;
+    padding:5px 14px;min-width:0;border-left:1px solid var(--line);overflow-wrap:anywhere}
 
-  /* ===== Side console ===== */
-  #side{ background:transparent; display:flex; flex-direction:column;
-    overflow:hidden; flex:0 0 340px; min-width:260px; gap:14px; }
-  .sensor-box{ flex:1; background:var(--panel); border:1px solid var(--line);
-    border-radius:var(--radius); display:flex; flex-direction:column;
-    position:relative; overflow:hidden; min-height:0; }
-  .sensor-head{ display:flex; justify-content:space-between; align-items:center;
-    padding:11px 16px; background:var(--panel-2); flex-shrink:0; }
-  .sensor-head .t{ font-size:10.5px; letter-spacing:.5px; color:var(--text);
-    font-weight:700; }
-  .sensor-head .hint{ font-size:10.5px; color:var(--amber); font-weight:700;
-    background:rgba(211,250,60,0.12); padding:2px 9px; border-radius:12px; }
-  .sensor-body{ position:relative; flex:1; min-height:0; overflow:hidden; }
-  #det-feed{ width:100%; height:100%; object-fit:contain; display:block;
-    background:#000; }
-  #det-caption{ position:absolute; top:12px; left:12px; font-size:10px;
-    color:var(--text); background:rgba(12,13,15,0.65); backdrop-filter:blur(6px);
-    padding:5px 12px; border-radius:20px; }
+  /* 실제 정지 요청을 연결할 독립 버튼 영역 */
+  #emergency-pane{padding:8px 12px;gap:6px;justify-content:center}
+  #emergency-stop{display:block;width:100%;min-height:44px;padding:8px 16px;
+    background:#c62828;color:#fff;border:1px solid #ef6464;border-radius:9px;
+    font-size:20px;font-weight:800;line-height:1.2;letter-spacing:1px;cursor:pointer;
+    box-shadow:0 2px 0 #7e1919;transition:background .15s,transform .1s,box-shadow .1s}
+  #emergency-stop:hover{background:#db3030}
+  #emergency-stop:active{background:#a51f1f;transform:translateY(1px);box-shadow:none}
+  #emergency-stop:focus-visible{outline:2px solid #fff;outline-offset:3px}
+  #emergency-stop-note{font-size:12px;line-height:16px;min-height:16px;text-align:center;color:var(--text-dim)}
+  *{scrollbar-width:thin;scrollbar-color:#626d7b transparent}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#626d7b;border-radius:5px;border:2px solid var(--panel)}
+  ::-webkit-scrollbar-thumb:hover{background:#8b98aa}
+  ::-webkit-scrollbar-track{background:transparent}
 
-  .expandable-panel{ cursor:pointer; }
-  .expandable-panel, .strip-col, .sensor-box{
-    transition:border-color .28s var(--hover-ease), box-shadow .28s var(--hover-ease); }
-  .expandable-panel:hover{ box-shadow:0 0 0 1.5px var(--amber-dim); }
-  #map-pane:hover, #logstrip > .strip-col:hover, #side > .sensor-box:hover{
-    border-color:var(--amber);
+  @media(max-width:1200px){
+    #main{grid-template-columns:minmax(0,1fr) 340px}
+    .side{gap:16px;padding:7px 16px}
+    .hp-block{min-width:140px;width:clamp(140px,15vw,190px)}
+    .spd-block{min-width:96px}
+    #center{padding:6px 14px}
   }
-  /* Draw inside every panel, above its contents, without intercepting input. */
-  .lime-hover-panel{ position:relative; }
-  .lime-hover-panel::after{
-    content:"";
-    position:absolute;
-    inset:0;
-    border:2px solid var(--amber);
-    border-radius:inherit;
-    pointer-events:none;
-    z-index:10;
-    opacity:0;
-    transition:opacity .28s var(--hover-ease);
+  @media(min-width:981px) and (max-height:780px){
+    #main{grid-template-rows:minmax(140px,1.35fr) minmax(90px,.55fr) minmax(0,1.65fr) 84px}
+    #topbar{min-height:66px}
+    .side{padding-top:6px;padding-bottom:6px}
+    .pane-head{padding-top:8px;padding-bottom:8px}
   }
-  .lime-hover-panel:hover::after{ opacity:1; }
-  .expandable-panel.expanded{
-    position:fixed !important; left:36px; right:36px; top:36px; bottom:36px;
-    width:auto !important; height:auto !important; z-index:30;
-    box-shadow:0 20px 60px rgba(0,0,0,0.7); }
-  #expand-backdrop{ display:none; position:fixed; inset:0;
-    background:rgba(0,0,0,0.65); backdrop-filter:blur(4px); z-index:29; }
-  #expand-backdrop.show{ display:block; }
-
-  /* ===== Shared rows ===== */
-  .card-body{ padding:2px 0; }
-  .row{ display:flex; justify-content:space-between; align-items:center;
-    padding:8px 16px; border-top:1px solid var(--line-soft); font-size:11px; }
-  .row .tag{ display:flex; align-items:center; gap:7px; }
-  .row .sw{ width:7px; height:7px; border-radius:50%; flex-shrink:0; }
-  .row .m{ color:var(--text-dim); text-align:right;
-    font-variant-numeric:tabular-nums; }
-  .row .m b{ color:var(--text); }
-  .row .m b.good{ color:var(--good); }
-  .row .m b.amber{ color:var(--amber); }
-  .row .m b.danger{ color:var(--danger); }
-  .empty{ padding:12px 16px; font-size:10.5px; color:var(--text-dim);
-    font-style:italic; }
-
-  .bar{ height:4px; border-radius:2px; background:var(--panel-2);
-    margin:0 16px 8px; overflow:hidden; }
-  .bar > i{ display:block; height:100%; border-radius:2px;
-    transition:width .3s ease; }
-
-  .log-row{ display:flex; gap:10px; align-items:flex-start; padding:8px 16px;
-    border-top:1px solid var(--line-soft); font-size:10.5px; }
-  .log-row .ts{ color:var(--text-dim); flex-shrink:0; width:56px; }
-  .log-row .body{ flex:1; color:var(--text); }
-  .log-row .body b{ color:var(--amber); }
-  .log-row.hit .body b{ color:var(--good); }
-  .log-row.miss .body b{ color:var(--danger); }
-  .log-row.system .body{ color:var(--text-dim); font-style:italic; }
-
-  /* 사격 상태 배지 */
-  .fc-badge{ margin:10px 16px 6px; padding:10px 13px; border-radius:12px;
-    background:var(--panel-2); border:1px solid var(--line);
-    display:flex; align-items:center; justify-content:space-between; }
-  .fc-badge .s{ font-size:14px; font-weight:800; letter-spacing:1px;
-    color:var(--text-dim); }
-  .fc-badge .r{ font-size:9px; color:var(--text-dim); letter-spacing:1px; }
-  .fc-badge.fire{ border-color:var(--good); }
-  .fc-badge.fire .s{ color:var(--good); }
-  .fc-badge.hold{ border-color:var(--amber-dim); }
-  .fc-badge.hold .s{ color:var(--amber); }
-
-  ::-webkit-scrollbar{ width:7px; height:7px; }
-  ::-webkit-scrollbar-thumb{ background:rgba(255,255,255,.09); border-radius:4px; }
-  ::-webkit-scrollbar-track{ background:transparent; }
-
-  /* v15 visual treatment only: retain v16 panel geometry and behavior. */
-  #st-myhp, #st-ehp, #fc-state{
-    font-family:var(--font-mono);
-    font-variant-numeric:tabular-nums;
+  @media(max-width:980px){
+    html,body{height:auto;min-height:100%;overflow:auto}
+    #app{height:auto;min-height:100vh;min-height:100dvh}
+    #main{flex:none;grid-template-columns:repeat(2,minmax(0,1fr));
+      grid-template-rows:minmax(420px,65vh) 300px 340px 88px;
+      grid-template-areas:'map map' 'log detect' 'fire fire' 'emergency emergency'}
+    #topbar{flex-wrap:wrap}
+    #center{order:-1;width:100%;flex-direction:column;gap:4px;
+      border:0;border-bottom:1px solid var(--line);padding:6px 14px}
+    .side{padding:7px 16px;gap:16px}
+    .hp-block{width:auto;min-width:100px;flex:1}
+    .spd-block{min-width:92px}
   }
-  .strip-head .n, .sensor-head .hint{
-    color:var(--amber);
-    background:var(--lime-soft);
+  @media(max-width:600px){
+    #app{padding:8px;gap:8px}
+    #main{gap:8px;grid-template-columns:minmax(0,1fr);
+      grid-template-rows:minmax(360px,60vh) 300px 210px 340px 88px;
+      grid-template-areas:'map' 'log' 'detect' 'fire' 'emergency'}
+    .side{gap:10px;padding:7px 10px}
+    .hp-block{min-width:50px}
+    .spd-block{min-width:78px}
+    .spd-block .v{font-size:19px}
+    .hp-block .k,.spd-block .k{font-size:12px}
+    #center{gap:4px}
+    #center .ttl{font-size:20px;letter-spacing:1.4px}
   }
-  /* Soft lime at rest, full lime on header hover; no geometry changes. */
-  .sensor-head .t, .strip-head .t{
-    color:var(--amber);
-    background:var(--lime-rest);
-    border-radius:5px;
-    box-shadow:0 0 0 6px var(--lime-rest);
-    transition:background-color .28s var(--hover-ease),
-      color .28s var(--hover-ease), box-shadow .28s var(--hover-ease);
-  }
-  .sensor-head:hover .t, .strip-head:hover .t{
-    color:var(--bg);
-    background:var(--amber);
-    box-shadow:0 0 0 6px var(--amber);
-  }
-  #map-caption{
-    color:var(--amber);
-    background:var(--lime-rest);
-    border-radius:10px;
-    font-weight:700;
-    transition:background-color .28s var(--hover-ease), color .28s var(--hover-ease);
-  }
-  #map-caption:hover{
-    color:var(--bg);
-    background:var(--amber);
-  }
-  .fc-badge.hold{
-    background:var(--lime-soft);
-    border-color:var(--amber-dim);
-  }
-  .fc-badge.fire{
-    background:rgba(79,214,122,0.08);
-  }
-  #map-readout > :last-child b{ color:var(--amber); }
-  #det-empty{ background:var(--bg); }
-  ::selection{ color:var(--bg); background:var(--amber); }
-
-  @media (prefers-reduced-motion:reduce){
-    .expandable-panel, .strip-col, .sensor-box,
-    .sensor-head .t, .strip-head .t, #map-caption{
-      transition:none;
-    }
-    .lime-hover-panel::after{ transition:none; }
-  }
-
-  @media (max-width:1280px){
-    #side{ flex:0 0 280px; }
-    #logstrip{ grid-template-columns:1fr 1fr; }
-    #logstrip > :nth-child(3){ display:none; }
+  @media(prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation:none!important;transition:none!important}
   }
 </style>
 </head>
 <body>
-<div id="expand-backdrop"></div>
 <div id="app">
 
-  <!-- ===== Top instrument bar ===== -->
+  <!-- ══ 1. 상단 ══ -->
   <div id="topbar">
-    <div id="callsign">
-      <div class="label">TANK CHALLENGE</div>
-      <div class="name">K2A1 · BLUE</div>
+    <div class="side">
+      <div class="hp-block">
+        <div class="k">아군 체력</div>
+        <div class="hp-bar" id="my-bar-wrap"><i id="my-bar"
+          style="width:100%;background:var(--good)"></i></div>
+        <div class="hearts" id="my-hearts" style="display:none"></div>
+      </div>
+      <div class="spd-block">
+        <div class="k">아군 속도</div>
+        <div class="v mono" id="my-spd">--</div>
+      </div>
     </div>
-    <div class="instrument"><div class="k">SIM T</div>
-      <div class="v mono" id="i-time">--</div></div>
-    <div class="instrument"><div class="k">SPEED</div>
-      <div class="v mono" id="i-speed">--</div></div>
-    <div class="instrument"><div class="k">RANGE</div>
-      <div class="v mono" id="i-dist">--</div></div>
-    <div class="instrument"><div class="k">HULL</div>
-      <div class="v mono good" id="i-hp">--</div></div>
-    <div class="instrument"><div class="k">ROUNDS</div>
-      <div class="v mono" id="i-shots">--</div></div>
-    <div class="instrument"><div class="k">HIT %</div>
-      <div class="v mono amber" id="i-rate">--</div></div>
-    <div id="topbar-spacer"></div>
-    <div id="linkstatus"><span class="dot"></span><span id="linktext">STANDBY</span></div>
+
+    <div id="center">
+      <div class="ttl">TANK CHALLENGE</div>
+      <div id="center-actions">
+        <div id="linkstatus"><span class="dot"></span><span id="linktext">STANDBY</span></div>
+        <button id="hpmode" type="button" title="체력 표시 전환">하트 보기</button>
+      </div>
+    </div>
+
+    <div class="side enemy">
+      <div class="spd-block right">
+        <div class="k">적 속도</div>
+        <div class="v mono" id="en-spd">--</div>
+      </div>
+      <div class="hp-block">
+        <div class="k" style="text-align:right">적 체력</div>
+        <div class="hp-bar" id="en-bar-wrap"><i id="en-bar"
+          style="width:100%;background:var(--danger)"></i></div>
+        <div class="hearts right" id="en-hearts" style="display:none"></div>
+      </div>
+    </div>
   </div>
 
-  <!-- ===== Main ===== -->
+  <!-- ══ 본문 ══ -->
   <div id="main">
 
-    <div id="leftcol">
-
-      <!-- 좌상: 3D 경로맵 -->
-      <div id="map-pane" class="expandable-panel lime-hover-panel">
-        <iframe id="view3d" src="/view3d" title="3D 전장"></iframe>
-        <div id="map-caption">3D 전장 · 경로 · 위협</div>
-        <div id="map-readout">
-          <div>아군 <b class="mono" id="ro-my">--</b></div>
-          <div class="enemy">적 <b class="mono" id="ro-enemy">--</b></div>
-          <div>경로 <b class="mono" id="ro-path">--</b></div>
-        </div>
+    <!-- 2 — 3D 지도 -->
+    <div class="pane" id="map-pane">
+      <div class="pane-body">
+        <iframe id="view3d" src="/view3d?embed=1" title="3D 전장"></iframe>
         <div id="map-placeholder">
-          <div class="ph-icon">▦</div>
+          <div class="ph-icon">&#9638;</div>
           <div>3D 뷰 연결 대기</div>
-          <div class="mono" style="font-size:10px; color:var(--text-dim)">
-            attach_viz(app, fm=fm, drive=drive_controller, detect=tskijun)
-          </div>
+          <div class="ph-help">시뮬레이터 연결을 확인해 주세요.<br>연결되면 이 영역에 3D 전장이 표시됩니다.</div>
         </div>
-      </div>
-
-      <!-- 하단 3분할 -->
-      <div id="logstrip">
-
-        <div class="strip-col lime-hover-panel">
-          <div class="strip-head">
-            <span class="t">교전 로그</span>
-            <span class="n mono" id="log-count">0</span>
-          </div>
-          <div class="strip-body" id="log-body">
-            <div class="empty">기록 없음</div>
-          </div>
-        </div>
-
-        <div class="strip-col lime-hover-panel">
-          <div class="strip-head">
-            <span class="t">실시간 상태</span>
-            <span class="n mono" id="st-mode">--</span>
-          </div>
-          <div class="strip-body">
-            <div class="card-body">
-              <div class="row" style="border-top:0">
-                <span class="tag"><span class="sw" style="background:var(--steel)"></span>아군 HP</span>
-                <span class="m"><b class="good" id="st-myhp">--</b></span></div>
-              <div class="bar"><i id="st-myhpbar" style="width:100%;background:var(--good)"></i></div>
-              <div class="row" style="border-top:0">
-                <span class="tag"><span class="sw" style="background:var(--danger)"></span>적 HP</span>
-                <span class="m"><b class="danger" id="st-ehp">--</b></span></div>
-              <div class="bar"><i id="st-ehpbar" style="width:100%;background:var(--danger)"></i></div>
-              <div class="row"><span class="tag">차체 방위</span>
-                <span class="m mono"><b id="st-body">--</b></span></div>
-              <div class="row"><span class="tag">차체 각속도</span>
-                <span class="m mono"><b id="st-rate">--</b></span></div>
-              <div class="row"><span class="tag">주행 상태</span>
-                <span class="m"><b id="st-drive">--</b></span></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="strip-col lime-hover-panel">
-          <div class="strip-head">
-            <span class="t">사격 정보</span>
-            <span class="n mono" id="fc-env">--</span>
-          </div>
-          <div class="strip-body">
-            <div class="fc-badge" id="fc-badge">
-              <span class="s" id="fc-state">IDLE</span>
-              <span class="r" id="fc-reason">대기</span>
-            </div>
-            <div class="card-body">
-              <div class="row"><span class="tag">포탑 방위</span>
-                <span class="m mono"><b id="fc-turret">--</b></span></div>
-              <div class="row"><span class="tag">앙각</span>
-                <span class="m mono"><b id="fc-pitch">--</b></span></div>
-              <div class="row"><span class="tag">명중 확률</span>
-                <span class="m mono"><b id="fc-phit">--</b></span></div>
-              <div class="row"><span class="tag">재장전</span>
-                <span class="m mono"><b id="fc-reload">--</b></span></div>
-              <div class="row"><span class="tag">권장 거리</span>
-                <span class="m mono"><b class="amber" id="fc-sug">--</b></span></div>
-            </div>
-          </div>
-        </div>
-
       </div>
     </div>
 
-    <!-- 우측: 객체 인식 -->
-    <div id="side">
-      <div class="sensor-box expandable-panel lime-hover-panel">
-        <div class="sensor-head">
-          <span class="t">객체 인식</span>
-          <span class="hint mono" id="det-count">0 DET</span>
-        </div>
-        <div class="sensor-body">
-          <img id="det-feed" alt="" style="display:none">
-          <div id="det-caption" style="display:none">DETECT FEED</div>
-          <div class="empty" id="det-empty">영상 대기</div>
-        </div>
+    <!-- 3 — 교전 로그 -->
+    <div class="pane" id="log-pane">
+      <div class="pane-head">
+        <span class="t">교전 로그</span>
+        <span class="n mono" id="log-count">0</span>
       </div>
+      <div class="pane-body" id="log-body" tabindex="0" role="region" aria-label="교전 로그 목록">
+        <div class="empty">기록 없음</div>
+      </div>
+    </div>
 
-      <div class="sensor-box lime-hover-panel">
-        <div class="sensor-head">
-          <span class="t">탐지 객체</span>
-          <span class="hint mono">THREAT</span>
-        </div>
-        <div class="sensor-body" style="overflow-y:auto">
-          <div id="obj-list"><div class="empty">탐지 없음</div></div>
-        </div>
+    <!-- 4 — 탐지 객체 -->
+    <div class="pane" id="detect-pane">
+      <div class="pane-head">
+        <span class="t">탐지 객체</span>
+        <span class="n mono" id="det-count">0 DET</span>
       </div>
+      <div class="pane-body" tabindex="0" role="region" aria-label="탐지 객체 목록">
+        <div id="obj-list"><div class="empty">탐지 없음</div></div>
+      </div>
+    </div>
+
+    <!-- 5 — 사격 정보 -->
+    <div class="pane" id="fire-pane">
+      <div class="pane-head">
+        <span class="t">사격 정보</span>
+        <span class="n mono" id="fc-env">--</span>
+      </div>
+      <div class="pane-body" tabindex="0" role="region" aria-label="사격 정보 항목">
+        <div class="row"><span class="tag">교전 거리</span>
+          <span class="m mono"><b id="fc-dist">--</b></span></div>
+        <div class="row"><span class="tag">권장 거리</span>
+          <span class="m mono"><b class="amber" id="fc-sug">--</b></span></div>
+        <div class="row"><span class="tag">포탑 방위</span>
+          <span class="m mono"><b id="fc-turret">--</b></span></div>
+        <div class="row"><span class="tag">앙각</span>
+          <span class="m mono"><b id="fc-pitch">--</b></span></div>
+        <div class="row"><span class="tag">명중 확률</span>
+          <span class="m mono"><b id="fc-phit">--</b></span></div>
+        <div class="row"><span class="tag">재장전</span>
+          <span class="m mono"><b id="fc-reload">--</b></span></div>
+        <div class="row"><span class="tag">사격 / 명중</span>
+          <span class="m mono"><b id="fc-shots">--</b></span></div>
+        <div class="row"><span class="tag">명중률</span>
+          <span class="m mono"><b class="amber" id="fc-rate">--</b></span></div>
+        <div class="row"><span class="tag">차체 각속도</span>
+          <span class="m mono"><b id="fc-brate">--</b></span></div>
+      </div>
+    </div>
+
+    <!-- 6 — 비상정지: 사격 정보와 분리된 독립 영역 -->
+    <div class="pane" id="emergency-pane" role="region" aria-label="비상정지">
+      <button id="emergency-stop" type="button" aria-describedby="emergency-stop-note">비상정지</button>
+      <div id="emergency-stop-note" role="status" aria-live="polite">정지 기능 연결 전</div>
     </div>
 
   </div>
 </div>
 
 <script>
-// ══════════════════════════════════════════════════════════
-//  viz3d 의 /state3d 를 그대로 쓴다. 새 엔드포인트가 필요 없다.
-//  좌상단 3D 맵은 /view3d 를 iframe 으로 끼워 자체 갱신된다.
-// ══════════════════════════════════════════════════════════
 const STATE_URL = "/state3d";
 const POLL_MS = 500;
 const $ = id => document.getElementById(id);
 const fmt = (v,u,d) => (v===null||v===undefined) ? "--"
   : ((typeof v==="number" ? v.toFixed(d===undefined?1:d) : v) + (u||""));
 
-const FC_STATE = {
-  FIRE:["fire","발사"], SLEW:["hold","조준 중"], RELOAD:["hold","재장전"],
-  HOLD:["hold","확률 미달"], TOFCAP:["hold","거리 초과"],
-  TURNING:["hold","차체 선회"], SETTLE:["hold","차체 정지 대기"],
-  NOTRACK:["hold","추적 불가"], INHIBIT:["","사격 금지"], IDLE:["","대기"],
+// ══════════════════════════════════════════════════════════
+//  피격 기반 체력
+//
+//  시나리오상 두 발을 맞으면 정지한다. 그래서 /info 의 HP 수치를
+//  그대로 쓰지 않고 '피격 횟수' 를 세어 절반씩 깎는다.
+//
+//  피격 판정: HP 가 줄어드는 순간을 한 번의 피격으로 본다.
+//  얼마나 줄었는지는 보지 않는다.
+// ══════════════════════════════════════════════════════════
+const MAX_HITS = 2;
+const hp = {
+  my:    { hits: 0, prev: null },
+  enemy: { hits: 0, prev: null },
 };
+
+function feedHp(side, v){
+  const st = hp[side];
+  if (v === null || v === undefined) return;
+  if (st.prev !== null && v < st.prev) st.hits = Math.min(MAX_HITS, st.hits + 1);
+  if (st.prev !== null && v > st.prev) st.hits = 0;   // 회복 = 새 에피소드
+  st.prev = v;
+}
+function resetHp(){
+  hp.my.hits = hp.enemy.hits = 0;
+  hp.my.prev = hp.enemy.prev = null;
+}
+
+let heartMode = false;
+function drawHp(){
+  const apply = (side, barId, wrapId, heartsId, color) => {
+    const left = MAX_HITS - hp[side].hits;
+    const pct  = (left / MAX_HITS) * 100;
+    $(barId).style.width = pct + "%";
+    $(barId).style.background =
+      pct > 50 ? color : pct > 0 ? "var(--amber)" : "var(--danger)";
+    $(heartsId).innerHTML = Array.from({ length: MAX_HITS }, (_, i) =>
+      `<span class="${i < left ? "" : "lost"}" style="color:${
+        i < left ? color : "var(--panel-2)"}">&#9829;</span>`).join("");
+    $(wrapId).style.display   = heartMode ? "none" : "block";
+    $(heartsId).style.display = heartMode ? "flex" : "none";
+  };
+  apply("my",    "my-bar", "my-bar-wrap", "my-hearts", "var(--good)");
+  apply("enemy", "en-bar", "en-bar-wrap", "en-hearts", "var(--danger)");
+}
+$("hpmode").addEventListener("click", () => {
+  heartMode = !heartMode;
+  $("hpmode").textContent = heartMode ? "체력바 보기" : "하트 보기";
+  drawHp();
+});
+
+// ── 탐지 결과 안정화 (한두 프레임 오인식 제거) ──────────
+const TRACK = { CONFIRM: 3, FORGET: 8, CELL: 5.0, DECAY: 0.98 };
+const tracks = new Map();
+function stabilize(objs){
+  const seen = new Set();
+  for (const o of objs){
+    if (o.x == null || o.z == null) continue;
+    const key = Math.round(o.x / TRACK.CELL) + "," + Math.round(o.z / TRACK.CELL);
+    seen.add(key);
+    let t = tracks.get(key);
+    if (!t){ t = { votes:{}, hits:0, miss:0 }; tracks.set(key, t); }
+    for (const k in t.votes) t.votes[k] *= TRACK.DECAY;
+    t.votes[o.c] = (t.votes[o.c] || 0) + 1;
+    t.hits = Math.min(t.hits + 1, 999); t.miss = 0;
+    t.x = o.x; t.z = o.z; t.d = o.d; t.th = o.th;
+  }
+  for (const [k, t] of tracks){
+    if (seen.has(k)) continue;
+    if (++t.miss > TRACK.FORGET) tracks.delete(k);
+  }
+  return [...tracks.values()]
+    .filter(t => t.hits >= TRACK.CONFIRM)
+    .map(t => {
+      const rank = Object.entries(t.votes).sort((a,b) => b[1] - a[1]);
+      const total = rank.reduce((a,[,v]) => a + v, 0) || 1;
+      return { c: rank[0][0], conf: rank[0][1] / total,
+               d: t.d, th: t.th, x: t.x, z: t.z };
+    })
+    .sort((a,b) => (b.th || 0) - (a.th || 0));
+}
+
 const CLS_COLOR = {
   Tank:"#ff6b6b", Tank1:"#ff6b6b", Tank2:"#ff6b6b",
   Human:"#d3fa3c", Human1:"#d3fa3c", Human2:"#d3fa3c", Human3:"#d3fa3c",
@@ -427,17 +403,38 @@ const CLS_COLOR = {
   Car:"#5b8cff", House:"#8b9098", Tent:"#8b9098", Wall:"#8b9098",
 };
 
-let lastFired = 0;
+// ── 교전 로그 ──────────────────────────────────────────
+let lastShotId = 0;
 const logs = [];
-
-function pushLog(text, kind, t){
-  logs.unshift({t: t==null?0:t, text, kind: kind||""});
-  logs.length = Math.min(logs.length, 60);
-  $("log-body").innerHTML = logs.map(l =>
-    `<div class="log-row ${l.kind}">
-       <span class="ts mono">${l.t.toFixed(1)}</span>
-       <span class="body">${l.text}</span></div>`).join("");
-  $("log-count").textContent = logs.length;
+function pushShot(x){
+  logs.unshift({ no: x.id, t: x.t, hit: x.hit, d: x.d,
+                 tof: x.tof, miss: x.miss, zone: x.zone, p: x.p_hit });
+  logs.length = Math.min(logs.length, 80);
+  renderLog();
+}
+function pushSys(text, t){
+  logs.unshift({ sys: text, t: t == null ? 0 : t });
+  logs.length = Math.min(logs.length, 80);
+  renderLog();
+}
+function renderLog(){
+  $("log-count").textContent = logs.filter(l => !l.sys).length;
+  $("log-body").innerHTML = logs.map(l => {
+    if (l.sys) return `<div class="log-row system">
+      <span class="no"></span><span class="ts mono">${(l.t||0).toFixed(1)}</span>
+      <span class="m">${l.sys}</span></div>`;
+    const p = [];
+    if (l.d != null)    p.push(`거리 <b>${l.d.toFixed(1)} m</b>`);
+    if (l.tof != null)  p.push(`비행 <b>${l.tof.toFixed(2)} s</b>`);
+    if (l.miss != null) p.push(`오차 <b>${l.miss.toFixed(2)} m</b>`);
+    if (l.zone)         p.push(`<b>${l.zone}</b>`);
+    if (l.p != null)    p.push(`p ${l.p.toFixed(2)}`);
+    return `<div class="log-row ${l.hit ? "hit" : "miss"}">
+      <span class="no mono">#${l.no == null ? "" : l.no}</span>
+      <span class="ts mono">${(l.t||0).toFixed(1)}</span>
+      <span class="res">${l.hit ? "명중" : "빗나감"}</span>
+      <span class="m mono">${p.join("  ·  ")}</span></div>`;
+  }).join("") || '<div class="empty">기록 없음</div>';
 }
 
 function setLink(live, msg){
@@ -445,188 +442,113 @@ function setLink(live, msg){
   $("linktext").textContent = msg || (live ? "LINK LIVE" : "NO SIGNAL");
 }
 
+let lastT = null;
 function render(s){
-  $("i-time").textContent  = fmt(s.t,"",1);
-  $("i-speed").textContent = fmt(s.my_spd," m/s");
-  $("i-dist").textContent  = fmt(s.dist," m");
-  $("i-hp").textContent    = s.my_hp==null ? "--" : s.my_hp;
-  $("i-shots").textContent = `${s.fired ?? 0}/${s.hits ?? 0}`;
-  $("i-rate").textContent  = fmt(s.rate,"%",0);
-  $("i-hp").className = "v mono " +
-    (s.my_hp==null ? "" : s.my_hp>60 ? "good" : s.my_hp>25 ? "amber" : "danger");
+  // 에피소드 재시작 감지 — sim_t 가 뒤로 갔다
+  if (lastT !== null && s.t !== null && s.t < lastT - 1){
+    resetHp(); logs.length = 0; lastShotId = 0; tracks.clear();
+    pushSys("에피소드 재시작", s.t);
+  }
+  lastT = s.t;
 
-  $("ro-my").textContent    = s.my ? `${s.my[0].toFixed(0)}, ${s.my[2].toFixed(0)}` : "--";
-  $("ro-enemy").textContent = s.enemy ? `${s.enemy[0].toFixed(0)}, ${s.enemy[2].toFixed(0)}` : "--";
-  $("ro-path").textContent  = (s.path||[]).length + " pt";
+  // 1 — 체력과 속도
+  feedHp("my", s.my_hp);
+  feedHp("enemy", s.enemy_hp);
+  drawHp();
+  $("my-spd").textContent = fmt(s.my_spd, " m/s");
+  $("en-spd").textContent = fmt(s.en_spd, " m/s");
 
-  const hp = (v,tx,bar,col) => {
-    $(tx).textContent = v==null ? "--" : v;
-    $(bar).style.width = (v==null?100:Math.max(0,Math.min(100,v))) + "%";
-    $(bar).style.background = col;
-  };
-  hp(s.my_hp,"st-myhp","st-myhpbar","var(--good)");
-  hp(s.enemy_hp,"st-ehp","st-ehpbar","var(--danger)");
-  $("st-body").textContent  = fmt(s.body,"°");
-  $("st-rate").textContent  = s.body_rate==null ? "--" : fmt(s.body_rate," °/s");
-  $("st-drive").textContent = s.mv || "--";
-  $("st-mode").textContent  = s.mv || "--";
+  // 5 — 사격 정보
+  $("fc-dist").textContent   = s.dist == null ? "--" : fmt(s.dist, " m");
+  $("fc-sug").textContent    = s.suggest == null ? "--" : fmt(s.suggest, " m");
+  $("fc-turret").textContent = fmt(s.turret, "\u00B0");
+  $("fc-pitch").textContent  = fmt(s.pitch, "\u00B0", 2);
+  $("fc-phit").textContent   = s.p_hit == null ? "--" : s.p_hit.toFixed(3);
+  $("fc-reload").textContent = s.reload == null ? "--" : fmt(s.reload, " s");
+  $("fc-shots").textContent  = `${s.fired == null ? 0 : s.fired} / ${s.hits == null ? 0 : s.hits}`;
+  $("fc-rate").textContent   = fmt(s.rate, " %", 1);
+  $("fc-brate").textContent  = s.body_rate == null ? "--" : fmt(s.body_rate, " \u00B0/s");
+  $("fc-env").textContent    = s.envelope ? `${s.envelope[0]}\u2013${s.envelope[1]} m` : "--";
 
-  const st = s.fc || "IDLE";
-  const [cls, reason] = FC_STATE[st] || ["", st];
-  $("fc-badge").className = "fc-badge " + cls;
-  $("fc-state").textContent  = st;
-  $("fc-reason").textContent = reason;
-  $("fc-turret").textContent = fmt(s.turret,"°");
-  $("fc-pitch").textContent  = fmt(s.pitch,"°",2);
-  $("fc-phit").textContent   = s.p_hit==null ? "--" : s.p_hit.toFixed(3);
-  $("fc-reload").textContent = s.reload==null ? "--" : fmt(s.reload," s");
-  $("fc-sug").textContent    = s.suggest==null ? "--" : fmt(s.suggest," m");
-  $("fc-env").textContent    = s.envelope ? `${s.envelope[0]}–${s.envelope[1]} m` : "--";
-
-  const objs = s.objects || [];
-  $("det-count").textContent = objs.length + " DET";
+  // 4 — 탐지 객체
+  const raw = s.objects || [];
+  const objs = stabilize(raw);
+  $("det-count").textContent = objs.length + " DET"
+    + (raw.length !== objs.length ? ` (${raw.length})` : "");
   $("obj-list").innerHTML = !objs.length
     ? '<div class="empty">탐지 없음</div>'
-    : objs.slice(0,20).map(o => {
+    : objs.slice(0, 24).map(o => {
         const c = CLS_COLOR[o.c] || "var(--khaki)";
         const th = o.th || 0;
+        const dim = o.conf < 0.7 ? ' class="uncertain" title="분류 신뢰도 낮음"' : "";
         return `<div class="row">
-          <span class="tag"><span class="sw" style="background:${c}"></span>${o.c}</span>
-          <span class="m mono">${o.d==null?"":o.d.toFixed(0)+" m"}
-            <b class="${th>.6?"danger":""}">${th.toFixed(2)}</b></span></div>`;
+          <span class="tag"><span class="sw" style="background:${c}"></span>
+            <span${dim}>${o.c}</span></span>
+          <span class="m mono">${o.d == null ? "" : o.d.toFixed(0) + " m"}
+            <b class="${th > .6 ? "danger" : ""}">${th.toFixed(2)}</b></span>
+        </div>`;
       }).join("");
 
+  // 3 — 교전 로그 (새 사격만 추가)
   const shots = s.shots || [];
-  if (shots.length && (s.fired ?? 0) > lastFired){
-    const x = shots[0];
-    pushLog(`사격 · 거리 ${x.d ?? "--"} m · <b>${x.hit?"명중":"빗나감"}</b>`
-      + (x.zone ? ` (${x.zone})` : ""), x.hit?"hit":"miss", s.t);
-  }
-  lastFired = s.fired ?? 0;
+  const ids = shots.map(x => x.id == null ? 0 : x.id);
+  shots.filter(x => (x.id == null ? 0 : x.id) > lastShotId)
+       .sort((a,b) => (a.id||0) - (b.id||0))
+       .forEach(pushShot);
+  if (ids.length) lastShotId = Math.max(lastShotId, ...ids);
 }
 
 async function poll(){
   try{
-    const r = await fetch(STATE_URL, {cache:"no-store"});
+    const r = await fetch(STATE_URL, { cache: "no-store" });
     const s = await r.json();
-    if (s.error) setLink(false,"STATE ERROR");
+    if (s.error) setLink(false, "STATE ERROR");
     else { render(s); setLink(true); }
   }catch(e){ setLink(false); }
   setTimeout(poll, POLL_MS);
 }
 
-// 패널 확대 — 클릭하면 전체 화면
-const backdrop = $("expand-backdrop");
-document.querySelectorAll(".expandable-panel").forEach(p => {
-  p.addEventListener("click", e => {
-    if (e.target.tagName === "IFRAME") return;   // 3D 조작을 방해하지 않는다
-    const on = p.classList.toggle("expanded");
-    backdrop.classList.toggle("show", on);
-  });
-});
-backdrop.addEventListener("click", () => {
-  document.querySelectorAll(".expanded").forEach(p => p.classList.remove("expanded"));
-  backdrop.classList.remove("show");
-});
-
-// /view3d is a separate same-origin document: theme its settings panel too.
-// Only presentation is changed; existing controls and their handlers are retained.
-function theme3dControls(){
-  let doc;
-  try { doc = $("view3d").contentDocument; } catch (_) { return; }
-  if (!doc || !doc.head || !doc.body || doc.getElementById("v16-lime-theme")) return;
-
-  const style = doc.createElement("style");
-  style.id = "v16-lime-theme";
-  style.textContent = `
-    [data-v16-lime-controls]{
-      --v16-lime:#d3fa3c;
-      --v16-ink:#f2f3f0;
-      --v16-muted:#a2aa8c;
-      color-scheme:dark;
-      color:var(--v16-ink) !important;
-      background:rgba(23,27,17,.97) !important;
-      border-color:rgba(211,250,60,.3) !important;
-      box-shadow:inset 0 1px 0 rgba(211,250,60,.06) !important;
-      font-family:'Inter','Segoe UI','Noto Sans KR',-apple-system,sans-serif !important;
-      accent-color:var(--v16-lime) !important;
-    }
-    [data-v16-lime-controls] *{
-      font-family:inherit !important;
-      accent-color:var(--v16-lime) !important;
-    }
-    [data-v16-lime-controls] :is(div,p,label){ color:var(--v16-ink) !important; }
-    [data-v16-lime-controls] :is(small,.muted,.hint){ color:var(--v16-muted) !important; }
-    [data-v16-lime-controls] :is(span,output,b,strong){ color:var(--v16-lime) !important; }
-    [data-v16-lime-controls] :is(output,input[type="number"]){
-      font-family:'Consolas','SFMono-Regular',ui-monospace,monospace !important;
-      font-variant-numeric:tabular-nums;
-    }
-    [data-v16-lime-controls] :is(select,input[type="number"],input[type="text"]){
-      color:var(--v16-ink) !important;
-      background:#0e120a !important;
-      border-color:rgba(211,250,60,.24) !important;
-    }
-    [data-v16-lime-controls] option{ color:var(--v16-ink); background:#171b11; }
-    [data-v16-lime-controls] input[type="range"]{
-      color:var(--v16-lime) !important;
-      accent-color:var(--v16-lime) !important;
-    }
-    [data-v16-lime-controls] button{
-      color:var(--v16-lime) !important;
-      background:rgba(211,250,60,.12) !important;
-      border-color:rgba(211,250,60,.28) !important;
-      transition:background-color .28s cubic-bezier(.22,1,.36,1),
-        color .28s cubic-bezier(.22,1,.36,1),
-        border-color .28s cubic-bezier(.22,1,.36,1) !important;
-    }
-    [data-v16-lime-controls] button:hover{
-      color:#0c0d0f !important;
-      background:var(--v16-lime) !important;
-      border-color:var(--v16-lime) !important;
-    }
-    [data-v16-lime-controls] :is(button,select,input):focus-visible{
-      outline:2px solid var(--v16-lime) !important;
-      outline-offset:2px;
-    }
-    [data-v16-lime-controls] :is(hr,fieldset){ border-color:rgba(211,250,60,.2) !important; }
-    @media (prefers-reduced-motion:reduce){
-      [data-v16-lime-controls] button{ transition:none !important; }
-    }
-  `;
-  doc.head.appendChild(style);
-
-  // Find the shared settings container without depending on /view3d's IDs.
-  // Never theme the renderer canvas or move/replace any of its controls.
-  const markPanel = () => {
-    for (const slider of doc.querySelectorAll('input[type="range"]')){
-      let panel = slider.parentElement;
-      while (panel && panel !== doc.body){
-        if (panel.querySelector('select') && panel.querySelector('input[type="checkbox"]')
-            && !panel.querySelector('canvas,iframe')){
-          panel.setAttribute("data-v16-lime-controls", "");
-          return true;
-        }
-        panel = panel.parentElement;
+// 같은 서버에서 열리는 3D 화면의 글자도 개선한다. 카메라·렌더러 크기는 건드리지 않는다.
+function improveViewText(){
+  try{
+    const doc = $("view3d").contentDocument;
+    if (!doc || !doc.head) return;
+    let style = doc.getElementById("dashboard-readable-text");
+    if (!style){ style = doc.createElement("style"); style.id = "dashboard-readable-text"; doc.head.appendChild(style); }
+    style.textContent = `
+      :root{--fg:#f6f8f1;--dim:#c9d2c7}
+      #cockpit-bar strong{font-size:15px}
+      #cockpit-bar .cockpit-control{font-size:14px;font-weight:600;line-height:1.4;color:#edf3e8}
+      #cockpit-bar .cockpit-control[aria-pressed=true]{color:#e1f9a6}
+      #cockpit-bearing,#cockpit-notice,#cockpit-status{font-size:14px;line-height:1.5}
+      #cockpit-bearing,#cockpit-notice,#cockpit-status span{color:#f1f6e9;background:rgba(15,23,18,.94);text-shadow:none}
+      #scope-inset .caption{font-size:13px;color:#f1f6e9}
+      #left .ck,#left .sl label,#left select,#right .row,#right .row b,#right .pill{font-size:13px;line-height:1.5}
+      #left h3,#right h3{font-size:12px}
+      @media(max-width:700px){
+        #cockpit-bar .cockpit-control{font-size:13px;padding:7px 9px}
+        #cockpit-status{font-size:13px}
       }
-    }
-    return false;
-  };
-  if (!markPanel()){
-    const observer = new MutationObserver(() => {
-      if (markPanel()) observer.disconnect();
-    });
-    observer.observe(doc.body, {childList:true, subtree:true});
-  }
+    `;
+  }catch(e){ /* 다른 출처의 iframe은 자체 글자 설정을 사용한다. */ }
 }
+// UI 연결 지점. 실제 정지 API가 제공되면 이 클릭 처리에 연결한다.
+// 서버 확인 없이 "정지 완료"를 표시하거나 임의의 제어 명령을 보내지 않는다.
+$("emergency-stop").addEventListener("click", () => {
+  $("emergency-stop-note").textContent = "정지 기능이 아직 연결되지 않았습니다.";
+});
 
-// 3D 뷰 로드 실패 감지
 let mapOk = false;
-$("view3d").addEventListener("load", () => { mapOk = true; theme3dControls(); });
-theme3dControls();
+$("view3d").addEventListener("load", () => {
+  mapOk = true;
+  $("map-pane").classList.remove("demo");
+  improveViewText();
+});
+if ($("view3d").contentDocument?.readyState === "complete") improveViewText();
 setTimeout(() => { if (!mapOk) $("map-pane").classList.add("demo"); }, 4000);
 
-pushLog("대시보드 시작", "system", 0);
+drawHp();
+pushSys("대시보드 시작", 0);
 poll();
 </script>
 </body>
