@@ -1,6 +1,7 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import csv
 import math
 import datetime
 import time
@@ -60,10 +61,67 @@ else:
     print("🧭 Planner: A* (full recompute every time)")
 
 
-def timed_find_path(start, goal):
+# ----------------------------------------------------------------------
+# 실측(유니티 연동) 벤치마크 로깅
+# ----------------------------------------------------------------------
+# 오프라인 benchmark_pathfinding.py 의 CSV 컬럼 구성과 최대한 맞춰서,
+# 실제 유니티 실행 로그와 오프라인 시뮬레이션 결과를 나중에 pandas로 그대로 concat 해서
+# 같이 분석할 수 있게 한다. 다른 점은 두 가지뿐:
+#   1) 오프라인 스크립트는 "obstacle_count/tick/event_idx" 처럼 실험 설계 축이 있지만,
+#      실제 유니티 로그는 그런 축이 없는 대신 "trigger"(왜 재계산이 발생했는지)를 남긴다.
+#   2) 실제 좌표(start/goal)도 같이 남겨서, 나중에 "그 경로가 실제로 몇 미터였는지"
+#      맵 상에서 재현/디버깅할 수 있게 한다.
+ALGO_NAME = "DStarLite" if USE_DSTAR_LITE else "AStar"   # 오프라인 CSV의 algo 컬럼 값과 동일하게 통일
+BENCH_LOG_DIR = "unity_bench_logs"
+os.makedirs(BENCH_LOG_DIR, exist_ok=True)
+REPLAN_LOG_PATH = os.path.join(BENCH_LOG_DIR, f"unity_replan_log_{ALGO_NAME}.csv")
+_replan_log_header_written = os.path.exists(REPLAN_LOG_PATH) and os.path.getsize(REPLAN_LOG_PATH) > 0
+
+# 다음 timed_find_path() 호출이 "왜" 발생했는지 표시해두는 플래그.
+# set_destination / update_obstacle 라우트가 호출되면 여기에 원인을 심어두고,
+# timed_find_path()가 실행되는 순간 이 값을 읽어서 로그에 남긴 뒤 초기화한다.
+# (심어두지 않았으면 get_action() 쪽에서 상황에 맞는 기본값을 넘긴다: initial/path_exhausted/divergence)
+_pending_trigger = None
+
+
+def path_length(path):
+    """경로(웨이포인트 리스트)의 총 유클리드 거리 - 오프라인 스크립트와 동일한 정의."""
+    if not path or len(path) < 2:
+        return 0.0
+    total = 0.0
+    for (x1, z1), (x2, z2) in zip(path, path[1:]):
+        total += math.hypot(x2 - x1, z2 - z1)
+    return total
+
+
+def _log_replan_event(trigger, start, goal, elapsed_ms, path):
+    """실제 유니티 실행 중 발생한 재계산 1건을 CSV 한 줄로 남긴다."""
+    global _replan_log_header_written
+    write_header = not _replan_log_header_written
+    with open(REPLAN_LOG_PATH, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(["timestamp", "algo", "trigger", "start_x", "start_z",
+                        "goal_x", "goal_z", "elapsed_ms", "path_points",
+                        "path_length", "compute_type"])
+            _replan_log_header_written = True
+        w.writerow([
+            datetime.datetime.now().isoformat(timespec="milliseconds"),
+            ALGO_NAME,
+            trigger,
+            f"{start[0]:.3f}", f"{start[1]:.3f}",
+            f"{goal[0]:.3f}", f"{goal[1]:.3f}",
+            f"{elapsed_ms:.4f}",
+            len(path),
+            f"{path_length(path):.4f}",
+            getattr(planner, "last_compute_type", "n/a"),
+        ])
+
+
+def timed_find_path(start, goal, trigger="unspecified"):
     """
     planner.find_path() 를 호출하면서, 알고리즘 종류와 무관하게 항상 동일한 방식으로
-    걸린 시간을 재고 출력하는 공통 wrapper.
+    걸린 시간을 재고 출력 + CSV 로그로 남기는 공통 wrapper.
 
     - D* Lite: find_path() 내부에 이미 자체 타이머(full_init/incremental 구분)가 있어서
       "⏱️ [D*Lite] ..." 로그가 한 번 더 찍히는데, 그건 탐색(ComputeShortestPath)만 잰 값이고
@@ -76,13 +134,23 @@ def timed_find_path(start, goal):
     두 알고리즘 모두 "server가 planner.find_path()를 부르기 직전 ~ 결과(waypoint 리스트)를
     돌려받은 직후"를 기준으로 재기 때문에, USE_DSTAR_LITE 스위치만 바꿔가며 비교해도
     측정 기준이 동일함.
+
+    trigger: 이 재계산이 왜 발생했는지 (initial / path_exhausted / divergence /
+             destination_change / obstacle_update). _pending_trigger가 심어져 있으면
+             그 값을 우선 사용하고, 없으면 호출부에서 넘긴 기본값을 그대로 쓴다.
     """
+    global _pending_trigger
+    actual_trigger = _pending_trigger if _pending_trigger is not None else trigger
+    _pending_trigger = None
+
     algo_name = "D*Lite" if USE_DSTAR_LITE else "A*"
     t0 = time.perf_counter()
     path = planner.find_path(start, goal)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     print(f"⏱️ [{algo_name}] find_path() 총 소요시간: {elapsed_ms:.3f} ms "
-          f"(path_len={len(path)})")
+          f"(path_len={len(path)}, trigger={actual_trigger})")
+
+    _log_replan_event(actual_trigger, start, goal, elapsed_ms, path)
     return path
 
 # 경로 추종 관련 전역 상태
@@ -526,6 +594,8 @@ def set_destination():
         # 목적지가 새로 들어오면 이전 경로는 무효화 -> 다음 /get_action에서 재계산
         current_path = []
         path_index = 0
+        global _pending_trigger
+        _pending_trigger = "destination_change"
         print(f"🎯 Destination set to: x={x}, y={y}, z={z}")
         return jsonify({"status": "OK", "destination": {"x": x, "y": y, "z": z}})
     except Exception as e:
@@ -561,9 +631,10 @@ def update_obstacle():
     planner.set_obstacles(obstacles)
 
     # 장애물이 바뀌면 기존 경로는 더 이상 유효하지 않을 수 있으므로 재계산 유도
-    global current_path, path_index
+    global current_path, path_index, _pending_trigger
     current_path = []
     path_index = 0
+    _pending_trigger = "obstacle_update"   # 다음 get_action()의 재계산이 이 이벤트 때문임을 표시
 
     print(f"🪨 Obstacle Data received, {len(obstacles)} obstacles set")
     return jsonify({'status': 'success', 'message': 'Obstacle data received'})
@@ -609,7 +680,7 @@ def get_action():
 
     # 경로가 없으면(최초 호출이거나 장애물/목적지가 갱신됐으면) 새로 계산
     if not current_path:
-        current_path = timed_find_path(current_pos, current_destination)
+        current_path = timed_find_path(current_pos, current_destination, trigger="initial")
         path_index = 0
         if not current_path:
             print("⚠️ No path found")
@@ -651,7 +722,7 @@ def get_action():
 
     if path_index >= len(current_path):
         # 경로 소진 -> 재계산
-        current_path = timed_find_path(current_pos, current_destination)
+        current_path = timed_find_path(current_pos, current_destination, trigger="path_exhausted")
         path_index = 0
         if not current_path:
             return jsonify(_stop_command())
@@ -673,7 +744,7 @@ def get_action():
         dist_to_target_wp = math.hypot(target_waypoint[0] - pos_x, target_waypoint[1] - pos_z)
         if dist_to_target_wp > PATH_DIVERGENCE_THRESHOLD:
             print(f"⚠️ Diverged from path (dist_to_wp={dist_to_target_wp:.2f}) - replanning")
-            current_path = timed_find_path(current_pos, current_destination)
+            current_path = timed_find_path(current_pos, current_destination, trigger="divergence")
             path_index = 0
             if not current_path:
                 return jsonify(_stop_command())
