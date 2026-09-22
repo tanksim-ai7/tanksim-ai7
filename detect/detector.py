@@ -1,4 +1,4 @@
-import detect.LibraryFile.TankSim as ts
+import detect.detection_server as ts
 
     # 1) /update_obstacle 에서 호출
 def update_obstacles_from_payload(payload: dict):
