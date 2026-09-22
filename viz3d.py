@@ -1174,8 +1174,11 @@ def _collect_drive():
     straight = (math.hypot(dest[0] - pos[0], dest[1] - pos[1])
                 if (pos and dest) else None)
 
+    tank1_list = _g(dv, "tank1_list")
+    
     return {
         "available": True,
+        "tank1_list": tank1_list,
         "pos": pos,
         "dest": dest,
         "path": pts,
@@ -3124,6 +3127,8 @@ function update3D(){
   if(f.aim3){ RN.aimSp.visible=L.aim;
     RN.aimSp.position.copy(V(f.aim3[0],f.aim3[2],3.4)); }
   else RN.aimSp.visible=false;
+
+  console.log("tank1 확인용", dv.tank1_list);
 
   // 경로 — 지형에 밀착
   if(dv.path&&dv.path.length>1){

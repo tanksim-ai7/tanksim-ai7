@@ -806,7 +806,8 @@ class TankDriveController:
             raise ValueError(
                 "TankDriveController requires path_planner."
             )
-
+        self.tank1_list = []
+        
         self.stop_flag = False
 
         self.planner = path_planner
@@ -1509,6 +1510,7 @@ class TankDriveController:
                 # (예: 바로 위에 갑자기 나타난 경우). 후퇴가 필요하다.
                 retreat_path = self._build_retreat_path()
                 retreat_path = self.planner.ultimate_one_pass_compression(retreat_path)
+                self.tank1_list = [obs for obs in self.planner.obstacle_rectangles if obs.type == 'enemy_tank']
                 
                 if retreat_path is None:
                     # 후퇴할 기록이 없다(예: 시작하자마자 막힘) -> 최후 수단으로
