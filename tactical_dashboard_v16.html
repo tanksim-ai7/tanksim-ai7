@@ -302,7 +302,7 @@
     <!-- 6 — 비상정지: 사격 정보와 분리된 독립 영역 -->
     <div class="pane" id="emergency-pane" role="region" aria-label="비상정지">
       <button id="emergency-stop" type="button" aria-describedby="emergency-stop-note">비상정지</button>
-      <div id="emergency-stop-note" role="status" aria-live="polite">정지 기능 연결 전</div>
+      <!-- <div id="emergency-stop-note" role="status" aria-live="polite">정지 기능 연결 전</div> -->
     </div>
 
   </div>
@@ -535,7 +535,20 @@ function improveViewText(){
 // UI 연결 지점. 실제 정지 API가 제공되면 이 클릭 처리에 연결한다.
 // 서버 확인 없이 "정지 완료"를 표시하거나 임의의 제어 명령을 보내지 않는다.
 $("emergency-stop").addEventListener("click", () => {
-  $("emergency-stop-note").textContent = "정지 기능이 아직 연결되지 않았습니다.";
+  try {
+    const response = fetch('/get_emg_stop', {
+      method: 'POST'
+    });
+    
+    if ($("emergency-stop").textContent == '비상정지') {
+      $("emergency-stop").textContent = '비상정지해제';
+    } else {
+      $("emergency-stop").textContent = '비상정지';
+    }
+  } catch (error) {
+    console.error('네트워크 에러:', error);
+  }
+  // $("emergency-stop-note").textContent = "정지 기능이 아직 연결되지 않았습니다.";
 });
 
 let mapOk = false;
