@@ -45,6 +45,33 @@ last_detections = []
 dest = None
 current_pos = None
 
+CLASS_THRESHOLDS = {
+    "Car": 0.95,
+    "House": 0.60,
+    "Human1": 0.50,
+    "Human2": 0.50,
+    "Human3": 0.50,
+    "Mine": 0.55,
+    "Rock": 0.25,
+    "Tank1": 0.45,
+    "Tank2": 0.80,
+    "Tent": 0.50,
+    "Wall": 0.90,
+}
+CLASS_COLORS = {
+    "Car": "#808080",
+    "House": "#808080",
+    "Human1": "#808080",
+    "Human2": "#808080",
+    "Human3": "#808080",
+    "Mine": "#808080",
+    "Rock": "#808080",
+    "Tank1": "#FF0000",
+    "Tank2": "#808080",
+    "Tent": "#808080",
+    "Wall": "#808080"
+}
+
 #@app.route("/detect", methods=["POST"])
 def detect():
     image_file = ts.request.files.get("image")
@@ -78,7 +105,7 @@ def detect():
         # ============================
         result = ts.model.predict(
             source=frame,
-            imgsz=960,
+            imgsz=1280,
             conf=0.25,
             iou=0.45,
             device=DEVICE,
@@ -106,7 +133,13 @@ def detect():
                     .cpu()
                     .item()
                 )
-                if confidence < 0.70:
+
+                threshold = CLASS_THRESHOLDS.get(
+                    class_name,
+                    0.5
+                )
+                
+                if confidence < threshold:
                     continue
 
                 x1, y1, x2, y2 = (
@@ -139,8 +172,13 @@ def detect():
                         float(center_x),
                         float(center_y)
                     ],
-                    "color": "#00FF00",
-                    "filled": False,
+
+                    "color": CLASS_COLORS.get(
+                    class_name,
+                    "#00FF00"
+                    ),
+
+                    "filled": True,
                     "updateBoxWhileMoving": False
                 }
 
