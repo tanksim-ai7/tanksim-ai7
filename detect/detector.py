@@ -52,9 +52,9 @@ CLASS_THRESHOLDS = {
     "Human2": 0.50,
     "Human3": 0.50,
     "Mine": 0.55,
-    "Rock": 0.25,
-    "Tank1": 0.45,
-    "Tank2": 0.80,
+    "Rock": 0.55,
+    "Tank1": 0.30,
+    "Tank2": 0.95,
     "Tent": 0.50,
     "Wall": 0.90,
 }
