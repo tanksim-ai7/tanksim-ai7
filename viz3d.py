@@ -392,7 +392,7 @@ def _planner_obstacles(drive):
         amin, amax = TANK_W * TANK_L * 0.80, (dmax ** 2) * 1.05
 
         out = []
-        for r in rects[:500]:
+        for r in rects:  # 2026-09-23: 500개 캡 제거 -- 맵이 커지면 뒷부분 오브젝트가 3D 뷰에서 사라지는 원인이었음
             try:
                 x0, x1 = float(r.x_min), float(r.x_max)
                 z0, z1 = float(r.z_min), float(r.z_max)
