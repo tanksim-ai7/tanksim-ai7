@@ -32,6 +32,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from move.dstar_lite_planner_cost import ObstacleRect
 from move.risk_planner import RiskDStarPlanner as DStarLitePlanner
 
+# 대시보드 작전 로그. 로그만 쌓는 모듈이라 없어도 주행에는 영향이 없다.
+try:
+    from dashboard.mission_log import mission_log
+except Exception:  # pragma: no cover
+    class _NoLog:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+    mission_log = _NoLog()
+
 
 # ============================================================
 # 공통 타입 설명
@@ -1139,6 +1148,9 @@ class TankDriveController:
         self.speed_pid.reset()
         self.steering_pid.reset()
 
+        mission_log.retreat_done()
+        mission_log.path_search(replan=True)
+
         print(
             "[RETREAT COMPLETE] "
             "후퇴 완료 -> 먼저 정지, "
@@ -1325,6 +1337,11 @@ class TankDriveController:
                 changed_cells, unmatched = self.planner.update_obstacles_type(
                     detections,
                 )
+
+            # 스테레오로 잡은 Tank1이 맵 좌표와 맞는지에 따라 로그 문구가 갈린다.
+            for det in detections:
+                if len(det) >= 4 and det[3] == 'Tank1':
+                    mission_log.tank_detected(matched=det not in unmatched)
 
             if changed_cells:
                 self.render_map("D* Lite Map (오브젝트 타입 갱신)")
@@ -1522,10 +1539,12 @@ class TankDriveController:
                     # 때문.)
                     # planner_lock은 RLock이라 이미 진입한 with 블록 안에서
                     # 다시 잡아도 안전하다(재진입 허용).
+                    mission_log.path_search(replan=True)
                     new_path = self.planner._find_path_with_recovery(
                         current_position, destination_xz,
                     )
                     is_risky = self.planner.last_path_is_risky_detour
+                    mission_log.path_found(bool(new_path))
 
                     self.current_path = new_path or []
                     self.current_path_is_risky = bool(new_path) and is_risky
@@ -1547,6 +1566,7 @@ class TankDriveController:
                 self._pivoting = False
                 self.speed_pid.reset()
                 self.steering_pid.reset()
+                mission_log.retreat()
 
                 print(
                     f"[_handle_obstacle_change] 후퇴 경로 재생성됨(진행 중 재탐지) "
@@ -1567,10 +1587,12 @@ class TankDriveController:
                 # find_path() 한 번이 아니라 _find_path_with_recovery()를
                 # 써서, 통로 자체가 넓게 끊긴 경우(예: enemy_tank ±49칸
                 # 패딩)까지 놓치지 않고 재시도한다.
+                mission_log.path_search(replan=True)
                 new_path = self.planner._find_path_with_recovery(
                     current_position, destination_xz,
                 )
                 is_risky = self.planner.last_path_is_risky_detour
+                mission_log.path_found(bool(new_path))
 
                 self.current_path = new_path or []
                 self.current_path_is_risky = bool(new_path) and is_risky
@@ -2178,12 +2200,21 @@ class TankDriveController:
             radius=2,
         )
 
-        with self.planner_lock:
-            self.current_path = self.planner.find_path(
-                self.current_pos,
-                self.dest,
-                self.latest_info
-            )
+        mission_log.dest_set()
+        mission_log.path_search()
+
+        try:
+            with self.planner_lock:
+                self.current_path = self.planner.find_path(
+                    self.current_pos,
+                    self.dest,
+                    self.latest_info
+                )
+        except Exception:
+            mission_log.path_found(False)
+            raise
+
+        mission_log.path_found(bool(self.current_path))
 
         self.render_map(
             "D* Lite Demo (300X300)"
@@ -3198,6 +3229,12 @@ class TankDriveController:
                 #     )
 
                 # 수정 본
+                # 경로가 비어 있던 상태에서의 탐색만 로그로 남긴다.
+                # (한 칸 움직일 때마다 하는 갱신까지 남기면 로그가 넘친다.)
+                fresh_plan = not self.current_path
+                if fresh_plan:
+                    mission_log.path_search(replan=True)
+
                 planner_lock_acquired = self.planner_lock.acquire(blocking=False)
 
                 if not planner_lock_acquired:
@@ -3249,6 +3286,9 @@ class TankDriveController:
                             and self.planner.last_path_is_risky_detour
                         )
 
+                    if fresh_plan:
+                        mission_log.path_found(bool(self.current_path))
+
         except ValueError as exc:
             print(
                 "D* Lite 경로 계산 실패:",
@@ -3256,6 +3296,7 @@ class TankDriveController:
             )
             self.current_path = []
             self.current_path_is_risky = False
+            mission_log.path_found(False)
 
             with self.planner_lock:
                 current_grid = self.planner.world_to_grid(
@@ -3303,6 +3344,10 @@ class TankDriveController:
             )
 
             return make_stop_command()
+
+        # 후퇴가 아닌 정상 전진 중 경로가 있으면 이동 시작으로 본다(탐색 뒤 1회).
+        if self.vehicle_mode == 'advance':
+            mission_log.move_start()
 
         # ----------------------------------------------------
         # 2) 최종 목적지까지 거리
@@ -3455,6 +3500,8 @@ class TankDriveController:
             or distance_to_goal
             <= self.STOP_DISTANCE_M
         ):
+            if not self.arrival_latched:
+                mission_log.arrived()
             self.arrival_latched = True
 
             if (

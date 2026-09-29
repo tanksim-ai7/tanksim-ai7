@@ -6,6 +6,7 @@ from fire.fire_module import FireModule
 import detect.detection_server as ts
 import detect.stereo as tskijun
 import detect.detector as tsinjee
+from dashboard.mission_log import mission_log, PHASE_COMBAT, PHASE_BASE
 import matplotlib
 import requests
 import threading
@@ -126,6 +127,9 @@ def info():
     # 원본 FireModule의 player/enemy/turret/target tracker 상태 갱신.
     fm.on_info(data)
 
+    # 작전 로그의 시각(시뮬레이션 시간).
+    mission_log.set_time(data.get("time"))
+
     # 기존 인식팀 /info 처리.
     tskijun.info()
 
@@ -140,6 +144,8 @@ def info():
                 drive_controller.handle_set_destination(dest)
             elif ALLY_DEST_LIST[ALLY_DEST_IDX-1][0]-1 <= data['playerPos']['x'] <= ALLY_DEST_LIST[ALLY_DEST_IDX-1][0]+1 and\
                  ALLY_DEST_LIST[ALLY_DEST_IDX-1][1]-1 <= data['playerPos']['z'] <= ALLY_DEST_LIST[ALLY_DEST_IDX-1][1]+1:
+                # 구출 지점 도착. 단계를 바꾸기 전에 남겨야 '구출 지점'으로 기록된다.
+                mission_log.arrived()
                 ALLY_DEST_LIST.append(path_planner.get_random_destination(data))
                 dest = {
                     "destination": f"{ALLY_DEST_LIST[ALLY_DEST_IDX][0]}, {data['playerPos']['y']}, {ALLY_DEST_LIST[ALLY_DEST_IDX][1]}"
@@ -150,6 +156,8 @@ def info():
                 ALLY_DEST_IDX += 1
 
                 # 여기서 5100에 좌표를 넘겨줘야 함
+                # 교전 지점 이동 단계. 이동 로그는 이 단계에서 남기지 않는다.
+                mission_log.set_phase(PHASE_COMBAT)
                 drive_controller.handle_set_destination(dest)
                 if ALLY_DEST_IDX == 2:
                     SEQ_FLAG = 'second'
@@ -158,6 +166,8 @@ def info():
         dest = {
             "destination": "280.0, 0, 170.0"
         }
+        # 아군 기지 복귀 단계. 목적지 설정 로그가 '기지'로 나오도록 먼저 바꾼다.
+        mission_log.set_phase(PHASE_BASE)
         drive_controller.handle_set_destination(dest)
         enemy_hit_count += 1
 
@@ -216,6 +226,8 @@ def get_action():
         rst_cmd["turretQE"] = turret_cmd["turretQE"]
         rst_cmd["turretRF"] = turret_cmd["turretRF"]
         rst_cmd["fire"] = turret_cmd["fire"]
+        if turret_cmd["fire"]:
+            mission_log.engaging()
 
     return jsonify(rst_cmd)
 
@@ -241,6 +253,7 @@ def update_bullet():
 
     # 여기서 enemy_hit_count가 2일 때 5100포트로 액션 넘겨줘야한다.
     if enemy_hit_count == 2:
+        mission_log.enemy_destroyed()
         SEQ_FLAG = 'third'
         threading.Thread(target=send_to_5100, args=({}, 'go_third_step'), daemon=True).start()
 
@@ -316,6 +329,7 @@ def init():
 
     # D* Lite/PID 내부 상태의 시작 위치 [x, z]를 simulator와 일치시킨다.
     drive_controller.initialize(start_position=(60.0, 27.23))
+    mission_log.reset()
 
     threading.Thread(target=send_to_5100, args=(config, 'init'), daemon=True).start()
 
@@ -330,6 +344,15 @@ def start():
 # ── 3D 뷰 + 대시보드 ──────────────────────────────
 from dashboard.viz3d import attach_viz
 attach_viz(app, fm=fm, drive=drive_controller, detect=tskijun)
+
+@app.route('/mission_log')
+def get_mission_log():
+    """대시보드 작전 로그. ?after=<마지막으로 받은 id> 이후 항목만 준다."""
+    try:
+        after = int(request.args.get('after', 0))
+    except ValueError:
+        after = 0
+    return jsonify(mission_log.snapshot(after))
 
 @app.route('/get_emg_stop', methods=['POST'])
 def get_emg_stop():

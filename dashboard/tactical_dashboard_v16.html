@@ -114,6 +114,8 @@
   .log-row.system{grid-template-columns:max-content minmax(0,1fr);align-items:baseline}
   .log-row.system .no{display:none}
   .log-row.system .m{grid-column:2;font-style:normal}
+  .log-row.system.warn .m{color:var(--danger);font-weight:600}
+  .log-row.system.ok .m{color:var(--good);font-weight:600}
 
   /* 탐지·사격 정보: 좁아진 패널 안에서 값과 라벨을 선명하게 구분 */
   .row{display:flex;justify-content:space-between;align-items:center;gap:12px;
@@ -249,13 +251,13 @@
       </div>
     </div>
 
-    <!-- 3 — 교전 로그 -->
+    <!-- 3 — 작전 상황 (아군 전차 진행 상황을 로그로 표시) -->
     <div class="pane" id="log-pane">
       <div class="pane-head">
-        <span class="t">교전 로그</span>
+        <span class="t">작전 상황</span>
         <span class="n mono" id="log-count">0</span>
       </div>
-      <div class="pane-body" id="log-body" tabindex="0" role="region" aria-label="교전 로그 목록">
+      <div class="pane-body" id="log-body" tabindex="0" role="region" aria-label="작전 상황 로그 목록">
         <div class="empty">기록 없음</div>
       </div>
     </div>
@@ -403,38 +405,41 @@ const CLS_COLOR = {
   Car:"#5b8cff", House:"#8b9098", Tent:"#8b9098", Wall:"#8b9098",
 };
 
-// ── 교전 로그 ──────────────────────────────────────────
-let lastShotId = 0;
+// ── 작전 상황 로그 ─────────────────────────────────────
+//  서버(/mission_log)가 주행·인식·사격 코드에서 남긴 이벤트를 내려준다.
+//  m:true 는 서버 이벤트, 나머지는 대시보드 자체 메시지다.
 const logs = [];
-function pushShot(x){
-  logs.unshift({ no: x.id, t: x.t, hit: x.hit, d: x.d,
-                 tof: x.tof, miss: x.miss, zone: x.zone, p: x.p_hit });
-  logs.length = Math.min(logs.length, 80);
-  renderLog();
-}
-function pushSys(text, t){
-  logs.unshift({ sys: text, t: t == null ? 0 : t });
+function pushSys(text, t, level, m){
+  logs.unshift({ sys: text, t: t == null ? 0 : t, level: level || "", m: !!m });
   logs.length = Math.min(logs.length, 80);
   renderLog();
 }
 function renderLog(){
-  $("log-count").textContent = logs.filter(l => !l.sys).length;
-  $("log-body").innerHTML = logs.map(l => {
-    if (l.sys) return `<div class="log-row system">
+  $("log-count").textContent = logs.length;
+  $("log-body").innerHTML = logs.map(l => `<div class="log-row system ${l.level}">
       <span class="no"></span><span class="ts mono">${(l.t||0).toFixed(1)}</span>
-      <span class="m">${l.sys}</span></div>`;
-    const p = [];
-    if (l.d != null)    p.push(`거리 <b>${l.d.toFixed(1)} m</b>`);
-    if (l.tof != null)  p.push(`비행 <b>${l.tof.toFixed(2)} s</b>`);
-    if (l.miss != null) p.push(`오차 <b>${l.miss.toFixed(2)} m</b>`);
-    if (l.zone)         p.push(`<b>${l.zone}</b>`);
-    if (l.p != null)    p.push(`p ${l.p.toFixed(2)}`);
-    return `<div class="log-row ${l.hit ? "hit" : "miss"}">
-      <span class="no mono">#${l.no == null ? "" : l.no}</span>
-      <span class="ts mono">${(l.t||0).toFixed(1)}</span>
-      <span class="res">${l.hit ? "명중" : "빗나감"}</span>
-      <span class="m mono">${p.join("  ·  ")}</span></div>`;
-  }).join("") || '<div class="empty">기록 없음</div>';
+      <span class="m">${l.sys}</span></div>`).join("") || '<div class="empty">기록 없음</div>';
+}
+
+let missionAfter = 0, missionEpoch = null;
+async function pollMission(){
+  try{
+    const r = await fetch(`/mission_log?after=${missionAfter}`, { cache: "no-store" });
+    const j = await r.json();
+    if (missionEpoch !== null && j.epoch !== missionEpoch){
+      // 에피소드가 새로 시작됐다 — 이전 서버 이벤트를 비우고 처음부터 다시 받는다.
+      for (let i = logs.length - 1; i >= 0; i--) if (logs[i].m) logs.splice(i, 1);
+      missionAfter = 0; missionEpoch = j.epoch;
+      renderLog();
+      return setTimeout(pollMission, 0);
+    }
+    missionEpoch = j.epoch;
+    (j.events || []).forEach(e => {
+      pushSys(e.text, e.t, e.level === "info" ? "" : e.level, true);
+      missionAfter = Math.max(missionAfter, e.id);
+    });
+  }catch(e){ /* 서버 연결 전에는 조용히 재시도한다 */ }
+  setTimeout(pollMission, POLL_MS);
 }
 
 function setLink(live, msg){
@@ -446,7 +451,7 @@ let lastT = null;
 function render(s){
   // 에피소드 재시작 감지 — sim_t 가 뒤로 갔다
   if (lastT !== null && s.t !== null && s.t < lastT - 1){
-    resetHp(); logs.length = 0; lastShotId = 0; tracks.clear();
+    resetHp(); tracks.clear();
     pushSys("에피소드 재시작", s.t);
   }
   lastT = s.t;
@@ -488,14 +493,6 @@ function render(s){
             <b class="${th > .6 ? "danger" : ""}">${th.toFixed(2)}</b></span>
         </div>`;
       }).join("");
-
-  // 3 — 교전 로그 (새 사격만 추가)
-  const shots = s.shots || [];
-  const ids = shots.map(x => x.id == null ? 0 : x.id);
-  shots.filter(x => (x.id == null ? 0 : x.id) > lastShotId)
-       .sort((a,b) => (a.id||0) - (b.id||0))
-       .forEach(pushShot);
-  if (ids.length) lastShotId = Math.max(lastShotId, ...ids);
 }
 
 async function poll(){
@@ -563,6 +560,7 @@ setTimeout(() => { if (!mapOk) $("map-pane").classList.add("demo"); }, 4000);
 drawHp();
 pushSys("대시보드 시작", 0);
 poll();
+pollMission();
 </script>
 </body>
 </html>
