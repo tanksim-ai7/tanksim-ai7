@@ -46,7 +46,7 @@ from flask import Blueprint, Response, jsonify, request
 #
 #  2026-09-08  "/view3d/taek" -> "/view3d" 로 줄였다.
 VIEW_PREFIX = "/view3d"
-VIEW_BUILD = "top-view-r4"
+VIEW_BUILD = "top-view-r4-dark-colors"
 
 bp = Blueprint("viz3d", __name__, url_prefix=VIEW_PREFIX)
 
@@ -1209,15 +1209,31 @@ const waterLevel=()=>TR? TR.lo+(TR.hi-TR.lo)*(WATERP/100) : 0;
 function mat(c,r,m){return new THREE.MeshStandardMaterial(
   {color:c,roughness:r===undefined?.78:r,metalness:m===undefined?.22:m});}
 
+// 표시 대상의 출처로 색을 구분한다. 실시간 적은 정지 중에도 진한 빨강을 유지한다.
+const TANK_PALETTES={
+  ally:{hull:0x2b5a91,turret:0x356ba6,track:0x121924,
+    metal:0x7a92ab,accent:0x1b3757,ring:0x72b8ff,emis:0x1673ff,glow:.50},
+  enemy:{hull:0xad1009,turret:0xcf1c12,track:0x1d0d0b,
+    metal:0x844943,accent:0x6d0b07,ring:0xff5248,emis:0xff1008,glow:.65},
+  obstacle:{hull:0x925666,turret:0xad6b7f,track:0x23171d,
+    metal:0x936b78,accent:0x703e52,ring:0xff9cba,emis:0xff8fab,glow:.28}
+};
+function applyTankGlow(tank,palette){
+  // 차체/포탑을 중심으로 발광시키고 궤도와 금속 부품의 명암은 남긴다.
+  const weights=[1,1,.30,.55,.06,.14];
+  tank.userData.mats.forEach((m,i)=>{
+    m.emissive.setHex(palette.emis);
+    m.emissiveIntensity=(palette.glow===undefined?.55:palette.glow)*(weights[i]===undefined?.14:weights[i]);
+    // 피격 점멸이 끝난 뒤에도 진영별 발광색으로 돌아오게 한다.
+    m.userData.emis=m.emissive.getHex();m.userData.inten=m.emissiveIntensity;
+  });
+}
 function buildTank(P){
-  // P: {hull, turret, track, metal, accent, ring, emis}
+  // P: {hull, turret, track, metal, accent, ring, emis, glow}
   const g=new THREE.Group();
   const mHull=mat(P.hull,.72,.25), mTur=mat(P.turret,.7,.28),
         mTrk=mat(P.track,.92,.12), mMet=mat(P.metal,.45,.75),
         mAcc=mat(P.accent,.5,.4);
-  // 진영이 멀리서도 구분되도록 은은한 자체발광을 넣는다.
-  if(P.emis){ mHull.emissive=new THREE.Color(P.emis); mHull.emissiveIntensity=.55;
-              mTur.emissive =new THREE.Color(P.emis); mTur.emissiveIntensity=.55; }
   // 발밑 진영 링
   const fring=new THREE.Mesh(new THREE.RingGeometry(3.7,4.5,40),
     new THREE.MeshBasicMaterial({color:P.ring,transparent:true,opacity:.6,
@@ -1292,6 +1308,7 @@ function buildTank(P){
     m.userData={emis:m.emissive.getHex(), inten:m.emissiveIntensity||0}; });
 
   g.userData={turret:T, gun:Gun, flash:flash, ring:fring, mats:mats};
+  if(P.emis) applyTankGlow(g,P);
   return g;
 }
 
@@ -1444,7 +1461,7 @@ function boot(){
 
   const sc=new THREE.Scene();
   sc.background=new THREE.Color(0x0a1018);
-  sc.fog=new THREE.FogExp2(0x243a52,0.0021);      // 푸른 대기 산란
+  sc.fog=new THREE.FogExp2(0x344548,0.0011);      // 어두운 대기로 원거리 지형의 명암 유지
   sc.add(skyDome());
 
   const cam=new THREE.PerspectiveCamera(46,innerWidth/innerHeight,0.5,4000);
@@ -1453,20 +1470,20 @@ function boot(){
   rd.setSize(innerWidth,innerHeight);
   rd.shadowMap.enabled=true; rd.shadowMap.type=THREE.PCFSoftShadowMap;
   rd.outputEncoding=THREE.sRGBEncoding;
-  rd.toneMapping=THREE.ACESFilmicToneMapping; rd.toneMappingExposure=0.82;
+  rd.toneMapping=THREE.ACESFilmicToneMapping; rd.toneMappingExposure=0.65;
   $('#gl').appendChild(rd.domElement);
 
   // ── 조명 ──
   // 지형 음영은 이미 정점색에 힐셰이드로 구워져 있다.
   // 그래서 3D 조명은 거의 평평하게 두고, 전차·나무만 입체로 살린다.
-  sc.add(new THREE.HemisphereLight(0x93aac4,0x191710,1.05));
-  const sun=new THREE.DirectionalLight(0xffeed2,0.62);
+  sc.add(new THREE.HemisphereLight(0x99a8ac,0x343629,0.70));
+  const sun=new THREE.DirectionalLight(0xd7d0b7,0.65);
   sun.position.set(150,240,110); sun.castShadow=true;
   sun.shadow.mapSize.set(2048,2048);
   const sh=sun.shadow.camera; sh.near=1; sh.far=900;
   sh.left=sh.bottom=-190; sh.right=sh.top=190; sh.updateProjectionMatrix();
   sun.shadow.bias=-0.0012; sc.add(sun);
-  const fill=new THREE.DirectionalLight(0x7ea8d8,0.30);
+  const fill=new THREE.DirectionalLight(0x7ea8d8,0.18);
   fill.position.set(-160,90,-120); sc.add(fill);
 
   // ── 지형 ──
@@ -1494,12 +1511,8 @@ function boot(){
   const foeG=new THREE.Group(); sc.add(foeG);   // 추정 적 전차 표식
 
   // ── 전차 ──
-  const me =buildTank({hull:0x2b5a91,turret:0x356ba6,track:0x121924,
-                       metal:0x7a92ab,accent:0x1b3757,
-                       ring:0x4b9cf5, emis:0x0b2140});
-  const foe=buildTank({hull:0xb01410,turret:0xcc1a13,track:0x1d0d0b,
-                       metal:0xd2837a,accent:0x6d0b07,
-                       ring:0xff2b21, emis:0x460604});
+  const me =buildTank(TANK_PALETTES.ally);
+  const foe=buildTank(TANK_PALETTES.enemy);
   sc.add(me); sc.add(foe);
 
   // ── 선 요소 ──
@@ -2094,9 +2107,7 @@ function buildHuman(i){
 
 /** 맵에 놓인 정지 전차 (소품 — 살아 있는 적이 아니다) */
 function buildPropTank(i){
-  const g=buildTank({hull:0x3a4038,turret:0x434a40,track:0x14170f,
-                     metal:0x6d7466,accent:0x252a20,
-                     ring:0x8d9099, emis:0x000000});
+  const g=buildTank(TANK_PALETTES.obstacle);
   if(g.userData.ring) g.userData.ring.visible=false;
   g.userData.turret.rotation.y=rnd(i+59,0,6.28);
   return g;
@@ -2894,7 +2905,7 @@ decodeTerrain=function(data){const t=originalDecodeTerrain(data);if(!t)return t;
   for(let j=0;j<n;j++)for(let i=0;i<n;i++){let sum=0;for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++)sum+=raw[Math.max(0,Math.min(n-1,j+y))*n+Math.max(0,Math.min(n-1,i+x))]*weights[y+1]*weights[x+1];smoothed[j*n+i]=raw[j*n+i]+Math.max(-.12,Math.min(.12,sum/16-raw[j*n+i]));}t.H=smoothed;return t;};
 const originalPaintTerrain=paintTerrain;
 paintTerrain=function(){originalPaintTerrain();if(!RN||!TR)return;const col=RN.geo.attributes.color,n=TR.n,raw=col.array.slice();
-  if(SURF==='terrain'){for(let j=0;j<n;j++)for(let i=0;i<n;i++){const dst=(j*n+i)*3;for(let c=0;c<3;c++){let sum=0,total=0;for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++){const w=(x===0?2:1)*(y===0?2:1);sum+=raw[(Math.max(0,Math.min(n-1,j+y))*n+Math.max(0,Math.min(n-1,i+x)))*3+c]*w;total+=w}col.array[dst+c]=Math.min(.65,(sum/total)*1.2+.012)}}col.needsUpdate=true;}
+  if(SURF==='terrain'){for(let j=0;j<n;j++)for(let i=0;i<n;i++){const dst=(j*n+i)*3;for(let c=0;c<3;c++){let sum=0,total=0;for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++){const w=(x===0?2:1)*(y===0?2:1);sum+=raw[(Math.max(0,Math.min(n-1,j+y))*n+Math.max(0,Math.min(n-1,i+x)))*3+c]*w;total+=w}col.array[dst+c]=Math.min(.65,sum/total)}}col.needsUpdate=true;}
 };
 buildTent=function(){const g=new THREE.Group(),cloth=mat(0x514733,.98,0),stripe=mat(0xd4d1bd,.97,0),pole=mat(0xaaa993,.7,.2);cloth.side=stripe.side=THREE.DoubleSide;
   const profile=[[-2.1,.1],[-1.8,2.2],[-1.1,2.9],[1.1,2.9],[1.8,2.2],[2.1,.1]],bounds=[-3,-1.1,1.1,3];
@@ -2939,7 +2950,7 @@ function impactVisual(position,hit,maxDuration=950){if(!RN||maxDuration<=0)retur
 const previousHitFlash=hitFlash;
 hitFlash=function(tank,base,mine){previousHitFlash(tank,base,mine);const now=performance.now();if(!tank.userData.lastImpact||now-tank.userData.lastImpact>250){tank.userData.lastImpact=now;impactVisual(base.clone().add(new THREE.Vector3(0,2,0)),true)}};
 const previousStepHit=stepHit;
-stepHit=function(dt){previousStepHit(dt);if(RN)[RN.me,RN.foe].forEach(t=>{if(t)t.userData.mats.forEach(m=>m.emissiveIntensity=Math.min(.3,m.emissiveIntensity))});};
+stepHit=function(dt){previousStepHit(dt);if(RN)[RN.me,RN.foe].forEach(t=>{if(t)t.userData.mats.forEach(m=>m.emissiveIntensity=Math.min((m.userData.inten||0)+.3,m.emissiveIntensity))});};
 function recentShot(sh,simTime){return sh&&Number.isFinite(sh.t)&&Number.isFinite(simTime)&&simTime>=sh.t&&simTime-sh.t<5;}
 function displayShot(sh,enemy,simTime){if(!RN||!sh.fire||!sh.imp||!recentShot(sh,simTime))return;
   const g=new THREE.Group(),a=V(sh.fire[0],sh.fire[1],2.7),b=V(sh.imp[0],sh.imp[1],.25),points=[],lift=Math.min(20,a.distanceTo(b)*.12);
@@ -2991,7 +3002,7 @@ body.settings #left{display:block;top:65px;bottom:245px;max-height:none}
 #cockpit-notice{position:fixed;top:110px;left:50%;transform:translateX(-50%);z-index:15;background:#1a211dde;padding:9px 15px;border:1px solid #667655;border-radius:6px;max-width:85%;text-align:center}
 @media(max-width:700px){#cockpit-bar strong{display:none}#cockpit-tools{margin-left:0}#cockpit-bar{gap:4px}.cockpit-control{padding:7px 9px}#cockpit-bearing{top:100px}#cockpit-status{font-size:10px}#cockpit-status span:last-child{display:none}#cockpit-notice{top:142px}}
 /* Visibility layout: keep the centre clear and the same legend in both views. */
-:root{--ally:#65e1ef;--enemy:#ff817d;--route:#d5f08b;--fg:#f1f5ef;--dim:#b9c8bf;--glass:rgba(14,23,23,.94);--line:rgba(196,222,210,.25)}
+:root{--ally:#72b8ff;--enemy:#ff5248;--route:#d5f08b;--fg:#f1f5ef;--dim:#b9c8bf;--glass:rgba(14,23,23,.94);--line:rgba(196,222,210,.25)}
 .cockpit-control{font-size:14px;min-height:38px;padding:8px 12px;color:#eaf1e9;border-color:#687b70}
 .cockpit-control:focus-visible,#mmh:focus-visible{outline:2px solid var(--ally);outline-offset:3px}
 #cockpit-bar{flex-wrap:nowrap}
@@ -3053,7 +3064,7 @@ body.top-mode #top-map-key{display:flex}
 <script>
 // All coordinates and statuses below are read-only simulator telemetry.
 const visibilityUI=(()=>{
-  const colors={ally:0x65e1ef,enemy:0xff817d,route:0xd5f08b};
+  const colors={ally:0x72b8ff,enemy:0xff5248,route:0xd5f08b};
   const $id=id=>document.getElementById(id),finite=Number.isFinite;
   const pair=p=>Array.isArray(p)&&p.length>=2&&finite(p[0])&&finite(p[1]);
   const pose=p=>Array.isArray(p)&&p.length>=3&&p.slice(0,3).every(finite);
@@ -3197,12 +3208,12 @@ const visibilityUI=(()=>{
       points.forEach((p,i)=>i?g.lineTo(X(p[0]),Z(p[1])):g.moveTo(X(p[0]),Z(p[1])));
       g.strokeStyle='#071216d9';g.lineWidth=(width+2)*D;g.stroke();g.strokeStyle=color;g.lineWidth=width*D;g.stroke();g.setLineDash([]);
     }
-    if(L.trail)path(recent(f.trail&&f.trail.my),'#65e1ef',false,2);
+    if(L.trail)path(recent(f.trail&&f.trail.my),'#72b8ff',false,2);
     if(L.route)path((dv.path||[]).filter(pair),'#d5f08b',true,2.5);
     g.strokeStyle='#0c191c';g.lineWidth=2*D;
     if(L.route&&pair(dv.dest)){const x=X(dv.dest[0]),z=Z(dv.dest[1]);g.fillStyle='#d5f08b';g.beginPath();g.moveTo(x,z);g.lineTo(x,z-15*D);g.lineTo(x+10*D,z-12*D);g.lineTo(x,z-8*D);g.closePath();g.stroke();g.fill()}
-    if(pose(tm.enemy)){const x=X(tm.enemy[0]),z=Z(tm.enemy[2]);g.fillStyle='#ff817d';g.beginPath();g.moveTo(x,z-6*D);g.lineTo(x+6*D,z);g.lineTo(x,z+6*D);g.lineTo(x-6*D,z);g.closePath();g.stroke();g.fill()}
-    if(pose(tm.my)){g.save();g.translate(X(tm.my[0]),Z(tm.my[2]));g.rotate((finite(tm.body_x)?tm.body_x:0)*Math.PI/180);g.fillStyle='#65e1ef';g.beginPath();g.moveTo(0,-8*D);g.lineTo(6*D,6*D);g.lineTo(0,3*D);g.lineTo(-6*D,6*D);g.closePath();g.stroke();g.fill();g.restore()}
+    if(pose(tm.enemy)){const x=X(tm.enemy[0]),z=Z(tm.enemy[2]);g.fillStyle='#ff5248';g.beginPath();g.moveTo(x,z-6*D);g.lineTo(x+6*D,z);g.lineTo(x,z+6*D);g.lineTo(x-6*D,z);g.closePath();g.stroke();g.fill()}
+    if(pose(tm.my)){g.save();g.translate(X(tm.my[0]),Z(tm.my[2]));g.rotate((finite(tm.body_x)?tm.body_x:0)*Math.PI/180);g.fillStyle='#72b8ff';g.beginPath();g.moveTo(0,-8*D);g.lineTo(6*D,6*D);g.lineTo(0,3*D);g.lineTo(-6*D,6*D);g.closePath();g.stroke();g.fill();g.restore()}
     g.fillStyle='#101a1ddd';g.fillRect(5*D,5*D,23*D,23*D);g.fillStyle='#f0f5eb';g.font='bold '+12*D+'px sans-serif';g.textAlign='center';g.fillText('N',16*D,21*D);
     const scale=P/6;g.fillStyle='#101a1ddd';g.fillRect(5*D,P-27*D,scale+13*D,23*D);g.strokeStyle='#edf2e7';g.lineWidth=2*D;g.beginPath();g.moveTo(11*D,P-10*D);g.lineTo(11*D+scale,P-10*D);g.stroke();g.textAlign='left';g.font=10*D+'px sans-serif';g.fillStyle='#f0f5eb';g.fillText('50 m',11*D,P-15*D);
   }
@@ -3281,16 +3292,18 @@ function makeTopMapView(){
     VS=1;el('vs').value='1';el('v-vs').textContent='1.0×';paintTerrain();
     Object.assign(L,{route:true,trail:true,shots:false,foeshots:false,rings:false,ray:false,los:false,known:false,det:false,aim:false,foes:false,label:true});
     document.querySelectorAll('[data-l]').forEach(e=>e.checked=L[e.dataset.l]);applyLayers();
-    RN.sc.fog.color.setHex(0x82928f);RN.sc.fog.density=.00075;RN.rd.toneMappingExposure=.95;
-    RN.sc.children.filter(o=>o.isHemisphereLight).forEach(o=>{o.color.setHex(0xc4d4d3);o.groundColor.setHex(0x58614e);o.intensity=.95});
-    RN.sun.color.setHex(0xf4eedc);RN.sun.intensity=.9;
+    RN.sc.fog.color.setHex(0x344548);RN.sc.fog.density=.0011;RN.rd.toneMappingExposure=.65;
+    RN.sc.children.filter(o=>o.isHemisphereLight).forEach(o=>{o.color.setHex(0x99a8ac);o.groundColor.setHex(0x343629);o.intensity=.70});
+    RN.sun.color.setHex(0xd7d0b7);RN.sun.intensity=.65;
     const oldSky=RN.sc.children.find(o=>o.isMesh&&o.geometry.type==='SphereGeometry'&&o.geometry.parameters.radius===1600);
     if(oldSky){const p=oldSky.geometry.attributes.position,c=oldSky.geometry.attributes.color;
-      const horizon=new THREE.Color(0x8b9b99),zenith=new THREE.Color(0x526f80),bottom=new THREE.Color(0x4a5749),v=new THREE.Color();
+      const horizon=new THREE.Color(0x4f6265),zenith=new THREE.Color(0x304b5a),bottom=new THREE.Color(0x323d36),v=new THREE.Color();
       for(let i=0;i<p.count;i++){const t=Math.max(0,Math.min(1,p.getY(i)/1600));v.copy(p.getY(i)<0?bottom:horizon).lerp(zenith,t);c.setXYZ(i,v.r,v.g,v.b)}c.needsUpdate=true;}
-    [RN.me,RN.foe].forEach((tank,index)=>{const colors=index?[0x9c2520,0xb6372c,0x542724,0x77241f,0x222723]:[0x555e42,0x65704c,0x424b3c,0x58613e,0x242922];
-      tank.userData.mats.forEach((m,i)=>{m.color.setHex(colors[i]);m.emissive.setHex(0);m.emissiveIntensity=0;m.userData.emis=0;m.userData.inten=0});tank.userData.ring.visible=false;});
-    refineScene();visibilityUI.setup();
+    [RN.me,RN.foe].forEach(tank=>{tank.userData.ring.visible=false;});
+    refineScene();
+    // 위장 무늬와 추가 장갑을 만든 뒤 표면 발광을 적용한다.
+    applyTankGlow(RN.me,TANK_PALETTES.ally);applyTankGlow(RN.foe,TANK_PALETTES.enemy);
+    visibilityUI.setup();
     uncertainty=new THREE.Mesh(new THREE.CircleGeometry(1,64),new THREE.MeshBasicMaterial({color:0xef987f,transparent:true,opacity:.15,side:THREE.DoubleSide,depthWrite:false}));uncertainty.rotation.x=-Math.PI/2;RN.sc.add(uncertainty);
     ghost=buildTank({hull:0xd2ed98,turret:0xd2ed98,track:0xd2ed98,metal:0xd2ed98,accent:0xd2ed98,ring:0xd2ed98});
     ghost.traverse(o=>{if(o.isMesh){o.material=o.material.clone();o.material.transparent=true;o.material.opacity=.19;o.material.depthWrite=false;o.castShadow=false}});ghost.userData.ring.visible=false;ghost.userData.flash.visible=false;RN.sc.add(ghost);
