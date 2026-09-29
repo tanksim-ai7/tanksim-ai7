@@ -19,9 +19,14 @@ viz3d.py — 전술 3D 상황도  (주소는 아래 VIEW_PREFIX 가 정한다)
         pass
 
 맵 표시
-    · 같은 폴더의 NewMap_final.map 을 서버 시작 시 바로 읽어 들인다.
+    · 2026-09-29  viz3d.py 는 dashboard/ 폴더로, .map 파일과 move/ 폴더는
+      ally-controller.py 와 같은 메인 폴더에 그대로 둔다 (Unity가 .map을 그
+      경로로 계속 갱신하고, move/ 는 ally-controller.py 가 직접 import 하는
+      패키지라서). 그래서 파일 경로는 전부 _MAIN_DIR(메인 폴더) 기준이고,
+      _HERE(이 파일 자신의 위치)는 더 이상 데이터 파일 조회에 쓰지 않는다.
+    · MAIN_DIR/<MAP_FILE> 을 서버 시작 시 바로 읽어 들인다.
       파일이 없거나 형식이 잘못되면 오브젝트 없는 빈 맵으로 동작하고, 콘솔에 바로 로그를 남긴다.
-    · .map에는 고도 격자가 없으므로 지형은 move/risk_layers.npz에서 읽는다.
+    · .map에는 고도 격자가 없으므로 지형은 MAIN_DIR/move/risk_layers.npz에서 읽는다.
       화면에서는 남→북 행 순서를 맵의 높이 분포와 축을 대조한 뒤 북→남으로 맞춘다.
 """
 
@@ -63,7 +68,8 @@ def _uncached_view(response):
 _REF = {"fm": None, "drive": None, "detect": None}
 _CACHE = {}
 _LOCK = threading.Lock()
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = os.path.dirname(os.path.abspath(__file__))       # dashboard/ (viz3d.py 자기 위치)
+_MAIN_DIR = os.path.dirname(_HERE)                        # 메인 폴더 (ally-controller.py, .map, move/ 가 있는 곳)
 
 MAP_SPAN = 300.0            # 맵 한 변 [m]
 TRAIL_MAX = 500             # 이동 궤적 보관 점 수
@@ -237,7 +243,7 @@ def _load_terrain():
            "hm": "", "sl": "", "ex": "", "bl": "", "ft": ""}
     try:
         import numpy as np
-        d = np.load(os.path.join(_HERE, "move", "risk_layers.npz"))
+        d = np.load(os.path.join(_MAIN_DIR, "move", "risk_layers.npz"))
         raw_height = np.nan_to_num(d["height"].astype("float32"))
         if raw_height.ndim != 2 or raw_height.shape[0] != raw_height.shape[1] or raw_height.shape[0] < 2:
             raise ValueError("높이맵은 2x2 이상의 정사각 격자여야 합니다")
@@ -309,7 +315,7 @@ def _load_map_data():
         return _CACHE["map_data"]
     data = {"terrainIndex": None, "obstacles": []}
     source = MAP_FILE + " (파일 없음, 빈 맵으로 대체)"
-    path = os.path.join(_HERE, MAP_FILE)
+    path = os.path.join(_MAIN_DIR, MAP_FILE)
     if os.path.isfile(path):
         try:
             with open(path, encoding="utf-8-sig") as f:
@@ -705,7 +711,7 @@ def _dest_tilt(dest):
         return None
     try:
         import flat_snap
-        flat_snap.init(_HERE)
+        flat_snap.init(_MAIN_DIR)
         return flat_snap.tilt_at(dest[0], dest[1])
     except Exception:
         return None

@@ -328,7 +328,7 @@ def start():
 
 
 # ── 3D 뷰 + 대시보드 ──────────────────────────────
-from viz3d import attach_viz
+from dashboard.viz3d import attach_viz
 attach_viz(app, fm=fm, drive=drive_controller, detect=tskijun)
 
 @app.route('/get_emg_stop', methods=['POST'])
@@ -344,7 +344,7 @@ def get_emg_stop():
 @app.route('/')
 def dashboard():
     return Response(
-        open('tactical_dashboard_v16.html', encoding='utf-8').read(),
+        open('dashboard/tactical_dashboard_v16.html', encoding='utf-8').read(),
         mimetype='text/html')
 
 if __name__ == '__main__':
