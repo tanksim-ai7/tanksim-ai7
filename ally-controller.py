@@ -376,16 +376,29 @@ def get_detected_list():
     tsinjee.DETECTED_LIST = []
     return jsonify(tmp)
 
-@app.route('/state3d', methods=['GET'])
+@app.route('/state3d')
 def state3d():
-    # TODO: rst 안에 나머지 변수 채워주기 (t, dist, suggest, ...)
-    rst = {
-        "my_spd": all_info["playerSpeed"],
-        "my_hp": all_info["playerHealth"],
-        "en_spd": all_info["enemySpeed"],
-        "enemy_hp": all_info["enemyHealth"],
-    }
-    return jsonify(rst)
+    """대시보드(사격 정보·체력·속도)가 0.5초마다 부르는 데이터 주소."""
+    tm = fm.tm                      # 시뮬레이터 /info 로 받은 최신 원자료
+    try:
+        st = fm.status()            # 사격 모듈이 정리한 요약 (거리, 명중률 등)
+    except Exception:
+        st = {}
+
+    return jsonify({
+        "t":         tm.t,                              # 시뮬 시간 (재시작 감지용)
+        "my_hp":     tm.my_hp,                          # 아군 체력
+        "enemy_hp":  tm.enemy_hp,                       # 적 체력
+        "my_spd":    round(tm.my_speed, 1),             # 아군 속도
+        "en_spd":    round(tm.enemy_speed, 1),          # 적 속도
+        "dist":      st.get("dist"),                    # 교전 거리
+        "suggest":   fm.suggest_range(),                # 권장 거리
+        "turret":    round(tm.turret_x, 1),             # 포탑 방위
+        "pitch":     round(tm.turret_y, 2),             # 앙각
+        "rate":      st.get("hit_rate", 0.0),           # 명중률
+        "envelope":  st.get("envelope"),                # 교전 가능 범위 [최소, 최대]
+        "body_rate": round(drive_controller.fire_body_rate_dps, 1),  # 차체 각속도
+    })
 
 if __name__ == '__main__':
     # 기존 refactored 서버와 동일하게 병렬 Flask 요청을 허용한다.
