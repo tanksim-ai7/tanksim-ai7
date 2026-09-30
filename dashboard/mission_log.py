@@ -53,12 +53,16 @@ class MissionLog:
             self._seq = 0
             self._epoch = 0 if not hasattr(self, "_epoch") else self._epoch + 1
             self._flags = set()
+            self._pflags = set()      # 단계(phase) 안에서 한 번만: 목적지가 바뀌어도 유지
+            self._last_shot = 0
             self._phase = PHASE_RESCUE
             self._sim_t = None
             self._t0 = time.monotonic()
 
     def set_phase(self, phase):
         with self._lock:
+            if phase != self._phase:
+                self._pflags.clear()
             self._phase = phase
 
     @property
@@ -89,12 +93,16 @@ class MissionLog:
                 return
             self._add(text, level)
 
-    def _once(self, flag, text, level="info", nav=False):
-        """flag 가 서 있지 않을 때만 남기고 flag 를 세운다."""
+    def _once(self, flag, text, level="info", nav=False, persist=False):
+        """
+        flag 가 서 있지 않을 때만 남기고 flag 를 세운다.
+        persist  True 면 목적지가 바뀌어도 유지되고 단계(phase)가 바뀔 때만 풀린다.
+        """
         with self._lock:
-            if flag in self._flags:
+            flags = self._pflags if persist else self._flags
+            if flag in flags:
                 return False
-            self._flags.add(flag)
+            flags.add(flag)
             if nav and self._phase in QUIET_NAV_PHASES:
                 return False
             self._add(text, level)
@@ -109,6 +117,13 @@ class MissionLog:
         """1·14. 새 목적지. 이전 목적지에서 쌓인 플래그를 모두 비운다."""
         with self._lock:
             self._flags.clear()
+            if self._phase == PHASE_COMBAT:
+                # 구출 지점 도착 뒤 왜 움직이는지 한 번만 알린다.
+                # 이후 교전 지점이 계속 바뀌어도(순찰) 다시 남기지 않는다.
+                if "move" not in self._pflags:
+                    self._pflags.add("move")
+                    self._add("교전 지점으로 이동 (적 전차 요격 위치)")
+                return
             if self._phase in QUIET_NAV_PHASES:
                 return
             if self._phase == PHASE_BASE:
@@ -162,6 +177,9 @@ class MissionLog:
 
     def arrived(self):
         """10·18. 목적지 도착. 목적지마다 한 번."""
+        if self._phase == PHASE_COMBAT:
+            self._once("wait", "교전 지점 도착 · 적 전차 대기중...", "info", persist=True)
+            return
         text = "목적지 도착 (%s)" % _DEST_LABEL[self._phase]
         self._once("arrived", text, "ok", nav=True)
 
@@ -179,7 +197,7 @@ class MissionLog:
         """
         if self._phase == PHASE_COMBAT:
             if not matched:
-                self._once("enemy_found", "적 전차 발견", "warn")
+                self._once("enemy_found", "적 전차 발견", "warn", persist=True)
         elif matched:
             self._once("threat", "적군 탱크 발견", "warn")
 
@@ -195,12 +213,33 @@ class MissionLog:
             self._clear("threat", "retreat", "moving", "path_failed")
 
     # ── 교전 (ally-controller) ──────────────────────────
-    def engaging(self):
-        """12. 사격 시작. 발견 로그 없이 쏘는 경우에도 순서가 맞도록 먼저 채운다."""
+    def shots(self, fired, dist=None):
+        """
+        12. 포격. fired 는 FireModule 의 누적 발사 수. 새로 늘어난 만큼만 남긴다.
+        첫 발에서 '적 전차 발견'(아직 없으면)과 '교전중...'을 먼저 남긴다.
+        """
         if self._phase != PHASE_COMBAT:
             return
-        self._once("enemy_found", "적 전차 발견", "warn")
-        self._once("engaging", "적 전차와 교전중...", "warn")
+        with self._lock:
+            if fired < self._last_shot:      # 사격 모듈이 초기화됨
+                self._last_shot = fired
+            new = list(range(self._last_shot + 1, fired + 1))
+            self._last_shot = max(self._last_shot, fired)
+        if not new:
+            return
+        self._once("enemy_found", "적 전차 발견", "warn", persist=True)
+        self._once("engaging", "적 전차와 교전중...", "warn", persist=True)
+        for n in new:
+            d = " (거리 %.0f m)" % dist if (dist is not None and n == new[-1]) else ""
+            self._emit("포격 #%d%s" % (n, d), "warn")
+
+    def enemy_hit(self, count, total=2):
+        """13. 적 전차 명중 (count/total)."""
+        self._emit("적 전차 명중 (%d/%d)" % (count, total), "ok")
+
+    def shot_missed(self):
+        """포탄이 적 전차에 맞지 않았다."""
+        self._emit("빗나감")
 
     def enemy_destroyed(self):
         """13. 적 전차 격파."""

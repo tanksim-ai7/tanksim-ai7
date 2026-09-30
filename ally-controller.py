@@ -43,6 +43,7 @@ drive_controller = TankDriveController(path_planner)
 # 적 전차 타격 횟수
 enemy_hit_count = 0
 pre_hit_time = None
+pre_impact_time = None  # 빗나감 로그 중복 방지용
 
 STOP_FLAG = False
 
@@ -226,8 +227,12 @@ def get_action():
         rst_cmd["turretQE"] = turret_cmd["turretQE"]
         rst_cmd["turretRF"] = turret_cmd["turretRF"]
         rst_cmd["fire"] = turret_cmd["fire"]
-        if turret_cmd["fire"]:
-            mission_log.engaging()
+        # 새로 나간 포탄만 작전 로그에 남긴다(FireModule 의 누적 발사 수 기준).
+        pending = getattr(fm.log, "pending", None)
+        mission_log.shots(
+            fm.log.fired,
+            pending.get("dist") if isinstance(pending, dict) else None,
+        )
 
     return jsonify(rst_cmd)
 
@@ -242,7 +247,8 @@ def update_bullet():
     # FireModule 내부 ShotLog/BiasEstimator에 착탄 결과를 전달한다.
     fm.on_impact(data)
 
-    global enemy_hit_count, pre_hit_time, SEQ_FLAG
+    global enemy_hit_count, pre_hit_time, SEQ_FLAG, pre_impact_time
+    prev_hit_count = enemy_hit_count
     if data.get('hit') == 'enemy':
         if pre_hit_time == None:
             enemy_hit_count += 1
@@ -250,6 +256,15 @@ def update_bullet():
             enemy_hit_count += 1
 
         pre_hit_time = datetime.datetime.now()
+
+    # 작전 로그: 착탄 한 발에 한 줄. /update_bullet 이 두 번 오는 경우는 1초 간격으로 거른다.
+    if enemy_hit_count > prev_hit_count and enemy_hit_count <= 2:
+        mission_log.enemy_hit(enemy_hit_count)
+    elif data.get('hit') != 'enemy':
+        now = datetime.datetime.now()
+        if pre_impact_time is None or (now - pre_impact_time).total_seconds() > 1:
+            mission_log.shot_missed()
+        pre_impact_time = now
 
     # 여기서 enemy_hit_count가 2일 때 5100포트로 액션 넘겨줘야한다.
     if enemy_hit_count == 2:
