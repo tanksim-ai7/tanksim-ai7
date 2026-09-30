@@ -116,28 +116,42 @@ class MissionLog:
             else:
                 self._add("목적지 설정됨 (%s)" % _DEST_LABEL[self._phase])
 
-    def path_search(self, replan=False):
-        """2·7·15. 경로 탐색 시작. 탐색 실패 뒤에는 성공할 때까지 반복해 남기지 않는다."""
+    def path_search(self, replan=False, auto=False):
+        """
+        2·7·15. 경로 탐색 시작.
+
+        replan  후퇴 완료·장애물 변경 등 '다시 찾는' 이유가 있을 때 True.
+        auto    get_action 이 경로가 빈 것을 보고 매 tick 부르는 호출.
+                이 구간에서 처음 하는 탐색일 때만 남기고, 나머지는 조용히 넘긴다.
+
+        문구는 이 구간(목적지 하나)에서 이미 탐색을 남겼는지로 정한다.
+        첫 탐색이면 replan 이어도 '경로 탐색중...' 이다.
+        """
         with self._lock:
             if self._phase in QUIET_NAV_PHASES:
                 return
-            self._clear("moving")
-            # 이미 탐색 중이거나(후퇴 완료 직후 get_action 이 또 부르는 경우),
-            # 실패한 뒤 매 프레임 재시도하는 경우에는 다시 남기지 않는다.
+            searched = "searched" in self._flags
+            if auto and searched:
+                return
+            # 이미 탐색 중이거나, 실패한 뒤 매 프레임 재시도하는 경우에는 남기지 않는다.
+            # (여기서 'moving' 을 건드리면 이동 시작이 매 tick 다시 나온다.)
             if "searching" in self._flags or "path_failed" in self._flags:
                 return
-            self._flags.add("searching")
-            self._add("경로 재탐색..." if replan else "경로 탐색중...")
+            self._flags.update(("searching", "searched"))
+            self._clear("moving")
+            self._add("경로 재탐색..." if (replan and searched) else "경로 탐색중...")
 
     def path_found(self, ok):
-        """3·8·16. 경로 탐색 결과."""
+        """3·8·16. 경로 탐색 결과. 탐색 시작을 남긴 뒤의 결과만 남긴다."""
         with self._lock:
+            searching = "searching" in self._flags
             self._clear("searching")
             if self._phase in QUIET_NAV_PHASES:
                 return
             if ok:
                 self._clear("path_failed")
-                self._add("경로 탐색 완료")
+                if searching:
+                    self._add("경로 탐색 완료")
             elif "path_failed" not in self._flags:
                 self._flags.add("path_failed")
                 self._add("경로 탐색 실패", "warn")
