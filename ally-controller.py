@@ -370,6 +370,12 @@ def dashboard():
         open('dashboard/tactical_dashboard_v16.html', encoding='utf-8').read(),
         mimetype='text/html')
 
+@app.route('/get_detected_list', methods=['POST'])
+def get_detected_list():
+    tmp = tsinjee.DETECTED_LIST
+    tsinjee.DETECTED_LIST = []
+    return jsonify(tmp)
+
 if __name__ == '__main__':
     # 기존 refactored 서버와 동일하게 병렬 Flask 요청을 허용한다.
     app.run(host='0.0.0.0', port=5000, threaded=True)

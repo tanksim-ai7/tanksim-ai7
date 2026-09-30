@@ -1,5 +1,7 @@
 import detect.detection_server as ts
 
+DETECTED_LIST = []
+
     # 1) /update_obstacle 에서 호출
 def update_obstacles_from_payload(payload: dict):
     obs_list = []
@@ -74,6 +76,9 @@ CLASS_COLORS = {
 
 #@app.route("/detect", methods=["POST"])
 def detect():
+    global DETECTED_LIST
+    DETECTED_LIST = []
+
     image_file = ts.request.files.get("image")
     if image_file is None:
         return ts.jsonify({
@@ -199,6 +204,7 @@ def detect():
                     3
                 )
             )
+            DETECTED_LIST.append({'name': d["className"], 'confidence': round(d["confidence"], 3)})
 
         return ts.jsonify(
             detections

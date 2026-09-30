@@ -70,7 +70,7 @@
   /* 3D 영역 유지, 오른쪽에는 넓힌 로그와 독립된 비상정지 칸을 배치한다. */
   #main{flex:1;display:grid;gap:12px;min-height:0;min-width:0;
     grid-template-columns:minmax(0,2.55fr) minmax(360px,1fr);
-    grid-template-rows:minmax(160px,1.4fr) minmax(110px,.55fr) minmax(0,1.8fr) 88px;
+    grid-template-rows:minmax(160px,1.4fr) minmax(200px,.55fr) minmax(0,1.6fr) 88px;
     grid-template-areas:'map log' 'map detect' 'map fire' 'map emergency'}
   #map-pane{grid-area:map;background:#0b1012}
   #log-pane{grid-area:log}
@@ -266,10 +266,10 @@
     <div class="pane" id="detect-pane">
       <div class="pane-head">
         <span class="t">탐지 객체</span>
-        <span class="n mono" id="det-count">0 DET</span>
+        <span class="n mono" id="det-count">0</span>
       </div>
-      <div class="pane-body" tabindex="0" role="region" aria-label="탐지 객체 목록">
-        <div id="obj-list"><div class="empty">탐지 없음</div></div>
+      <div class="pane-body" id="obj-body" tabindex="0" role="region" aria-label="탐지 객체 목록">
+        <div id="obj-list"></div>
       </div>
     </div>
 
@@ -288,12 +288,12 @@
           <span class="m mono"><b id="fc-turret">--</b></span></div>
         <div class="row"><span class="tag">앙각</span>
           <span class="m mono"><b id="fc-pitch">--</b></span></div>
-        <div class="row"><span class="tag">명중 확률</span>
+        <!-- <div class="row"><span class="tag">명중 확률</span>
           <span class="m mono"><b id="fc-phit">--</b></span></div>
         <div class="row"><span class="tag">재장전</span>
           <span class="m mono"><b id="fc-reload">--</b></span></div>
         <div class="row"><span class="tag">사격 / 명중</span>
-          <span class="m mono"><b id="fc-shots">--</b></span></div>
+          <span class="m mono"><b id="fc-shots">--</b></span></div> -->
         <div class="row"><span class="tag">명중률</span>
           <span class="m mono"><b class="amber" id="fc-rate">--</b></span></div>
         <div class="row"><span class="tag">차체 각속도</span>
@@ -342,6 +342,37 @@ function feedHp(side, v){
 function resetHp(){
   hp.my.hits = hp.enemy.hits = 0;
   hp.my.prev = hp.enemy.prev = null;
+}
+
+const timerId = setInterval(detectListFunction, 1000);
+function detectListFunction() {
+  fetch('http://localhost:5000/get_detected_list', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  })
+  .then(response => response.json())
+  .then(dataList => {
+    if (!dataList || dataList.length === 0) return;
+    const objListDiv = document.getElementById('obj-list');
+    let total = Number(document.getElementById('det-count').innerHTML);
+    total += dataList.length;
+    document.getElementById('det-count').innerHTML = total;
+
+    dataList.forEach(item => {
+      const row = document.createElement('div');
+      row.style.padding = '8px';
+      row.style.borderBottom = '1px solid #eee';
+      row.innerHTML = `<strong>${item.name}</strong> (신뢰도: ${(item.confidence * 100).toFixed(2)}%)`;
+      
+      // 최상단에 요소 추가
+      objListDiv.insertBefore(row, objListDiv.firstChild);      
+    });
+  })
+  .catch(error => {
+    console.error("API 호출 중 오류 발생:", error);
+  });
 }
 
 let heartMode = false;
