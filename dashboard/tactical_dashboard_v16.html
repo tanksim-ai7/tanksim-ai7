@@ -70,7 +70,7 @@
   /* 3D 영역 유지, 오른쪽에는 넓힌 로그와 독립된 비상정지 칸을 배치한다. */
   #main{flex:1;display:grid;gap:12px;min-height:0;min-width:0;
     grid-template-columns:minmax(0,2.55fr) minmax(360px,1fr);
-    grid-template-rows:minmax(160px,1.4fr) minmax(200px,.55fr) minmax(0,1.6fr) 88px;
+    grid-template-rows:minmax(155px,1.4fr) minmax(160px,.55fr) minmax(0,1.65fr) 88px;
     grid-template-areas:'map log' 'map detect' 'map fire' 'map emergency'}
   #map-pane{grid-area:map;background:#0b1012}
   #log-pane{grid-area:log}
@@ -129,6 +129,7 @@
   .row .m b.amber{color:var(--amber)}
   .uncertain{color:var(--text-dim);text-decoration:underline dotted;text-underline-offset:4px}
   .empty{padding:14px;font-size:14px;color:var(--text-dim);font-style:normal}
+  .detected{padding:5px 14px;font-size:13px;border-bottom:1px solid var(--line-soft);color:var(--text-dim);font-style:normal}
   /* 사격 정보의 항목과 수치를 같은 위치의 세로선으로 구분한다. */
   #fire-pane .row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
     align-items:stretch;gap:0;padding:0;min-height:32px}
@@ -362,10 +363,12 @@ function detectListFunction() {
 
     dataList.forEach(item => {
       const row = document.createElement('div');
-      row.style.padding = '8px';
-      row.style.borderBottom = '1px solid #eee';
-      row.innerHTML = `<strong>${item.name}</strong> (신뢰도: ${(item.confidence * 100).toFixed(2)}%)`;
-      
+      row.className = 'detected';
+      if (item.name == 'Tank1' || item.name == 'Human1' || item.name == 'Human2') {
+        row.style.color = '#c62828';
+      }
+      row.innerHTML = `${item.name} (신뢰도: ${(item.confidence * 100).toFixed(2)}%)`;
+     
       // 최상단에 요소 추가
       objListDiv.insertBefore(row, objListDiv.firstChild);      
     });
