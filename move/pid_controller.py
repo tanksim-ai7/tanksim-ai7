@@ -3233,7 +3233,7 @@ class TankDriveController:
                 # (한 칸 움직일 때마다 하는 갱신까지 남기면 로그가 넘친다.)
                 fresh_plan = not self.current_path
                 if fresh_plan:
-                    mission_log.path_search(replan=True)
+                    mission_log.path_search(auto=True)
 
                 planner_lock_acquired = self.planner_lock.acquire(blocking=False)
 
