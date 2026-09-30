@@ -483,12 +483,15 @@ function setLink(live, msg){
 
 let lastT = null;
 function render(s){
+  // TODO
+  // localhost:5000/state3d 완성 후 주석 해제해주기
+
   // 에피소드 재시작 감지 — sim_t 가 뒤로 갔다
-  if (lastT !== null && s.t !== null && s.t < lastT - 1){
-    resetHp(); tracks.clear();
-    pushSys("에피소드 재시작", s.t);
-  }
-  lastT = s.t;
+  // if (lastT !== null && s.t !== null && s.t < lastT - 1){
+  //   resetHp(); tracks.clear();
+  //   pushSys("에피소드 재시작", s.t);
+  // }
+  // lastT = s.t;
 
   // 1 — 체력과 속도
   feedHp("my", s.my_hp);
@@ -498,35 +501,16 @@ function render(s){
   $("en-spd").textContent = fmt(s.en_spd, " m/s");
 
   // 5 — 사격 정보
-  $("fc-dist").textContent   = s.dist == null ? "--" : fmt(s.dist, " m");
-  $("fc-sug").textContent    = s.suggest == null ? "--" : fmt(s.suggest, " m");
-  $("fc-turret").textContent = fmt(s.turret, "\u00B0");
-  $("fc-pitch").textContent  = fmt(s.pitch, "\u00B0", 2);
-  $("fc-phit").textContent   = s.p_hit == null ? "--" : s.p_hit.toFixed(3);
-  $("fc-reload").textContent = s.reload == null ? "--" : fmt(s.reload, " s");
-  $("fc-shots").textContent  = `${s.fired == null ? 0 : s.fired} / ${s.hits == null ? 0 : s.hits}`;
-  $("fc-rate").textContent   = fmt(s.rate, " %", 1);
-  $("fc-brate").textContent  = s.body_rate == null ? "--" : fmt(s.body_rate, " \u00B0/s");
-  $("fc-env").textContent    = s.envelope ? `${s.envelope[0]}\u2013${s.envelope[1]} m` : "--";
-
-  // 4 — 탐지 객체
-  const raw = s.objects || [];
-  const objs = stabilize(raw);
-  $("det-count").textContent = objs.length + " DET"
-    + (raw.length !== objs.length ? ` (${raw.length})` : "");
-  $("obj-list").innerHTML = !objs.length
-    ? '<div class="empty">탐지 없음</div>'
-    : objs.slice(0, 24).map(o => {
-        const c = CLS_COLOR[o.c] || "var(--khaki)";
-        const th = o.th || 0;
-        const dim = o.conf < 0.7 ? ' class="uncertain" title="분류 신뢰도 낮음"' : "";
-        return `<div class="row">
-          <span class="tag"><span class="sw" style="background:${c}"></span>
-            <span${dim}>${o.c}</span></span>
-          <span class="m mono">${o.d == null ? "" : o.d.toFixed(0) + " m"}
-            <b class="${th > .6 ? "danger" : ""}">${th.toFixed(2)}</b></span>
-        </div>`;
-      }).join("");
+  // $("fc-dist").textContent   = s.dist == null ? "--" : fmt(s.dist, " m");
+  // $("fc-sug").textContent    = s.suggest == null ? "--" : fmt(s.suggest, " m");
+  // $("fc-turret").textContent = fmt(s.turret, "\u00B0");
+  // $("fc-pitch").textContent  = fmt(s.pitch, "\u00B0", 2);
+  // $("fc-phit").textContent   = s.p_hit == null ? "--" : s.p_hit.toFixed(3);
+  // $("fc-reload").textContent = s.reload == null ? "--" : fmt(s.reload, " s");
+  // $("fc-shots").textContent  = `${s.fired == null ? 0 : s.fired} / ${s.hits == null ? 0 : s.hits}`;
+  // $("fc-rate").textContent   = fmt(s.rate, " %", 1);
+  // $("fc-brate").textContent  = s.body_rate == null ? "--" : fmt(s.body_rate, " \u00B0/s");
+  // $("fc-env").textContent    = s.envelope ? `${s.envelope[0]}\u2013${s.envelope[1]} m` : "--";
 }
 
 async function poll(){

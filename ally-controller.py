@@ -376,6 +376,17 @@ def get_detected_list():
     tsinjee.DETECTED_LIST = []
     return jsonify(tmp)
 
+@app.route('/state3d', methods=['GET'])
+def state3d():
+    # TODO: rst 안에 나머지 변수 채워주기 (t, dist, suggest, ...)
+    rst = {
+        "my_spd": all_info["playerSpeed"],
+        "my_hp": all_info["playerHealth"],
+        "en_spd": all_info["enemySpeed"],
+        "enemy_hp": all_info["enemyHealth"],
+    }
+    return jsonify(rst)
+
 if __name__ == '__main__':
     # 기존 refactored 서버와 동일하게 병렬 Flask 요청을 허용한다.
     app.run(host='0.0.0.0', port=5000, threaded=True)
