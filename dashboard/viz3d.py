@@ -408,7 +408,11 @@ def _planner_obstacles(drive):
 
                 # ── 적 전차 추정 ──
                 guess = None
-                if (dmin <= w <= dmax and dmin <= dep <= dmax
+                # 플래너가 이미 타입을 확정한 장애물(스테레오 Tank1 재분류 등)은
+                # 크기로 추정하지 않는다. 추정으로 표시하면 3D 뷰 후처리가
+                # 자연물로 되돌려서 확정된 적 전차가 화면에서 사라진다.
+                if (t == "nature"
+                        and dmin <= w <= dmax and dmin <= dep <= dmax
                         and amin <= w * dep <= amax):
                     near = min((math.hypot(sx - cx, sz - cz)
                                 for sx, sz, _k in static), default=999.0)
