@@ -398,6 +398,7 @@ def _planner_obstacles(drive):
         amin, amax = TANK_W * TANK_L * 0.80, (dmax ** 2) * 1.05
 
         out = []
+        confirmed = set()
         for r in rects:  # 2026-09-23: 500개 캡 제거 -- 맵이 커지면 뒷부분 오브젝트가 3D 뷰에서 사라지는 원인이었음
             try:
                 x0, x1 = float(r.x_min), float(r.x_max)
@@ -419,6 +420,8 @@ def _planner_obstacles(drive):
                     if near > 4.0:            # 맵 원본에 없는 물체
                         guess = "enemy_tank"
 
+                if t == "enemy_tank":
+                    confirmed.add((round(cx), round(cz)))
                 out.append({
                     "x0": round(x0, 1), "x1": round(x1, 1),
                     "z0": round(z0, 1), "z1": round(z1, 1),
@@ -428,9 +431,18 @@ def _planner_obstacles(drive):
                 })
             except Exception:
                 continue
+        # 확정된 적 전차가 새로 생기면 콘솔에 한 번 알린다(위험 지대 표시 확인용).
+        new = confirmed - _SEEN_ENEMY_TANKS
+        if new:
+            _SEEN_ENEMY_TANKS.update(new)
+            print("[viz3d] 확정된 적 전차 -> 3D 위험 지대 표시 대상:", sorted(new), flush=True)
         return out
-    except Exception:
+    except Exception as exc:
+        print("[viz3d] 인지 장애물 수집 실패:", type(exc).__name__, exc, flush=True)
         return []
+
+
+_SEEN_ENEMY_TANKS = set()
 
 
 def _shots(fm):
@@ -684,11 +696,33 @@ def _collect_drive():
     straight = (math.hypot(dest[0] - pos[0], dest[1] - pos[1])
                 if (pos and dest) else None)
 
-    tank1_list = _g(dv, "tank1_list")
+    # 후퇴 때 pid_controller 가 ObstacleRect(dataclass) 객체 목록을 넣어 둔다.
+    # Flask 버전에 따라 dataclass 를 JSON 으로 못 바꿔 /state 전체가 실패하고
+    # (그러면 3D 뷰의 장애물·위험 지대가 통째로 사라진다) 일반 dict 로 바꿔서 내보낸다.
+    confirmed_tanks = []
+    try:
+        for c in (_g(dv, "confirmed_enemy_tanks") or []):
+            confirmed_tanks.append({"cx": _num(c[0], 1), "cz": _num(c[1], 1),
+                                    "x0": _num(c[2], 1), "x1": _num(c[3], 1),
+                                    "z0": _num(c[4], 1), "z1": _num(c[5], 1)})
+    except Exception:
+        confirmed_tanks = []
+    tank1_list = []
+    try:
+        for r in (_g(dv, "tank1_list") or []):
+            tank1_list.append({
+                "x0": _num(_g(r, "x_min")), "x1": _num(_g(r, "x_max")),
+                "z0": _num(_g(r, "z_min")), "z1": _num(_g(r, "z_max")),
+                "t": _g(r, "type"),
+            })
+    except Exception:
+        tank1_list = []
     
     return {
         "available": True,
         "tank1_list": tank1_list,
+        # 이번 에피소드에서 스테레오로 확인된 적 전차 (3D 위험 지대 표시용)
+        "confirmed_tanks": confirmed_tanks,
         "pos": pos,
         "dest": dest,
         "path": pts,
@@ -2743,20 +2777,27 @@ function update3D(){
           depthWrite:false}));
       const cx=(o.x0+o.x1)/2,cz=(o.z0+o.z1)/2;
       m.position.copy(V(cx,cz,1.8)); RN.knownG.add(m);
-      if(o.t==='enemy_tank'){
-        // 확인된 적 전차: 빨갛게 칠한다.
-        const fill=new THREE.Mesh(new THREE.BoxGeometry(w,3.2,d2),
-          new THREE.MeshBasicMaterial({color:0xef4444,transparent:true,
-            opacity:.85,depthWrite:false}));
-        fill.position.copy(m.position); RN.knownG.add(fill);
-      }});
+      });
+  }
 
-    // 적 위험 지대: 확인된 적 전차 중심에서 반지름 DANGER_R 의 빨간 반투명 원.
-    //   지형에 붙도록 원판의 점마다 지형 높이를 읽어 배치한다.
+  // 적 위험 지대
+  //   플래너가 타입을 enemy_tank 로 바꿔 둔 장애물이 아니라,
+  //   '이번 에피소드에서 스테레오 탐지가 맵 오브젝트와 맞아 확인된' 적 전차만 그린다.
+  //   (플래너의 분류 목록은 에피소드가 바뀌어도 남아서, 그걸 쓰면 시작하자마자 표시된다.)
+  const ct=dv.confirmed_tanks||[];
+  const ctSig=ct.map(o=>o.cx+','+o.cz).join(';')+'|'+VS;
+  if(RN.dangerSig!==ctSig){
+    RN.dangerSig=ctSig;
     if(!RN.dangerG){RN.dangerG=new THREE.Group(); RN.sc.add(RN.dangerG); RN.dangerG.visible=L.danger;}
     RN.dangerG.clear();
-    kn.filter(o=>o.t==='enemy_tank').forEach(o=>{
-      const cx=(o.x0+o.x1)/2,cz=(o.z0+o.z1)/2;
+    ct.forEach(o=>{
+      const cx=o.cx,cz=o.cz;
+      // 전차 오브젝트를 빨갛게 칠한다.
+      const w=Math.max(2,o.x1-o.x0),d2=Math.max(2,o.z1-o.z0);
+      const fill=new THREE.Mesh(new THREE.BoxGeometry(w,3.2,d2),
+        new THREE.MeshBasicMaterial({color:0xef4444,transparent:true,opacity:.9,depthWrite:false}));
+      fill.position.copy(V(cx,cz,1.8)); fill.renderOrder=7; RN.dangerG.add(fill);
+      // 반지름 DANGER_R 의 빨간 반투명 원. 지형에 붙도록 점마다 지형 높이를 읽어 배치한다.
       const geo=new THREE.RingGeometry(0.01,DANGER_R,72,10);
       const pos=geo.attributes.position;
       for(let i=0;i<pos.count;i++){

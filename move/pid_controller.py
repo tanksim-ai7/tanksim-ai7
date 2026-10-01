@@ -816,6 +816,9 @@ class TankDriveController:
                 "TankDriveController requires path_planner."
             )
         self.tank1_list = []
+        # 이번 에피소드에서 스테레오 탐지가 맵 오브젝트와 맞아서 '확인'된 적 전차.
+        # (cx, cz, x_min, x_max, z_min, z_max). 3D 뷰의 위험 지대 표시용이며 initialize() 에서 비운다.
+        self.confirmed_enemy_tanks = []
         
         self.stop_flag = False
 
@@ -1280,6 +1283,23 @@ class TankDriveController:
         thread.start()
         return {"status": "queued"}
 
+    def _remember_enemy_tank(self, x: float, z: float) -> None:
+        """스테레오로 확인된 적 전차의 맵 오브젝트 위치를 기록한다(표시용, 제어에는 쓰이지 않음)."""
+        try:
+            for r in self.planner.obstacle_rectangles:
+                if r.x_min <= x <= r.x_max and r.z_min <= z <= r.z_max:
+                    cx = (r.x_min + r.x_max) / 2.0
+                    cz = (r.z_min + r.z_max) / 2.0
+                    # 프레임마다 다시 탐지되므로 같은 오브젝트는 한 번만 담는다.
+                    if all(math.hypot(cx - t[0], cz - t[1]) > 3.0
+                           for t in self.confirmed_enemy_tanks):
+                        self.confirmed_enemy_tanks.append(
+                            (cx, cz, r.x_min, r.x_max, r.z_min, r.z_max)
+                        )
+                    return
+        except Exception as exc:
+            print(f"[_remember_enemy_tank] 기록 실패(무시): {exc}")
+
     def _process_objects_detected(self, detections) -> None:
         """
         handle_objects_detected()가 백그라운드 스레드에서 실행하는 실제 로직.
@@ -1341,7 +1361,10 @@ class TankDriveController:
             # 스테레오로 잡은 Tank1이 맵 좌표와 맞는지에 따라 로그 문구가 갈린다.
             for det in detections:
                 if len(det) >= 4 and det[3] == 'Tank1':
-                    mission_log.tank_detected(matched=det not in unmatched)
+                    matched = det not in unmatched
+                    mission_log.tank_detected(matched=matched)
+                    if matched:
+                        self._remember_enemy_tank(det[0], det[2])
 
             if changed_cells:
                 self.render_map("D* Lite Map (오브젝트 타입 갱신)")
@@ -2114,6 +2137,7 @@ class TankDriveController:
         ]
 
         self.current_path = []
+        self.confirmed_enemy_tanks = []
 
         # 새 episode에서는 이전 episode의 breadcrumb/후퇴 상태가
         # 섞이지 않도록 항상 advance로 초기화한다.
