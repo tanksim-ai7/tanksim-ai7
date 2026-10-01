@@ -402,14 +402,6 @@ def get_detected_list():
     tsinjee.DETECTED_LIST = []
     return jsonify(tmp)
 
-@app.route('/state3d')
-def state3d():
-    """대시보드(사격 정보·체력·속도)가 0.5초마다 부르는 데이터 주소."""
-    tm = fm.tm                      # 시뮬레이터 /info 로 받은 최신 원자료
-    try:
-        st = fm.status()            # 사격 모듈이 정리한 요약 (거리, 명중률 등)
-    except Exception:
-        st = {}
 
     return jsonify({
         "t":         tm.t,                              # 시뮬 시간 (재시작 감지용)
