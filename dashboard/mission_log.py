@@ -18,6 +18,7 @@ ally-controller.py 의 /mission_log 가 대시보드에 그대로 내려준다.
 이 모듈은 로그만 쌓는다. 제어 로직에는 아무 영향도 주지 않는다.
 """
 
+import functools
 import threading
 import time
 from collections import deque
@@ -55,6 +56,8 @@ class MissionLog:
             self._flags = set()
             self._pflags = set()      # 단계(phase) 안에서 한 번만: 목적지가 바뀌어도 유지
             self._last_shot = 0
+            self._my_hp = None
+            self._my_hits = 0
             self._phase = PHASE_RESCUE
             self._sim_t = None
             self._t0 = time.monotonic()
@@ -116,6 +119,12 @@ class MissionLog:
     def dest_set(self):
         """1·14. 새 목적지. 이전 목적지에서 쌓인 플래그를 모두 비운다."""
         with self._lock:
+            # 기지 복귀 목적지는 단계당 한 번만 알린다. 같은 목적지가 다시 들어와도
+            # (동시에 들어온 /info 등) 로그와 진행 플래그를 되돌리지 않는다.
+            if self._phase == PHASE_BASE:
+                if "dest" in self._pflags:
+                    return
+                self._pflags.add("dest")
             self._flags.clear()
             if self._phase == PHASE_COMBAT:
                 # 구출 지점 도착 뒤 왜 움직이는지 한 번만 알린다.
@@ -146,30 +155,34 @@ class MissionLog:
             if self._phase in QUIET_NAV_PHASES:
                 return
             searched = "searched" in self._flags
-            if auto and searched:
+            # auto(매 tick 의 경로 갱신)와 replan 이 아닌 일반 호출(목적지 설정)은
+            # 이 구간의 첫 탐색일 때만 남긴다.
+            if searched and (auto or not replan):
                 return
-            # 이미 탐색 중이거나, 실패한 뒤 매 프레임 재시도하는 경우에는 남기지 않는다.
+            # 이미 탐색 중이면(실패 후 재시도 포함) 남기지 않는다.
             # (여기서 'moving' 을 건드리면 이동 시작이 매 tick 다시 나온다.)
-            if "searching" in self._flags or "path_failed" in self._flags:
+            if "searching" in self._flags:
                 return
             self._flags.update(("searching", "searched"))
             self._clear("moving")
             self._add("경로 재탐색..." if (replan and searched) else "경로 탐색중...")
 
     def path_found(self, ok):
-        """3·8·16. 경로 탐색 결과. 탐색 시작을 남긴 뒤의 결과만 남긴다."""
+        """
+        3·8·16. 경로 탐색 완료. 탐색 시작을 남긴 뒤의 성공만 남긴다.
+
+        실패는 화면에 남기지 않는다. 실패하면 '탐색 중' 상태를 그대로 두어,
+        이후 재시도가 성공했을 때 '경로 탐색 완료'가 이어서 나오게 한다.
+        """
+        if not ok:
+            return
         with self._lock:
             searching = "searching" in self._flags
             self._clear("searching")
             if self._phase in QUIET_NAV_PHASES:
                 return
-            if ok:
-                self._clear("path_failed")
-                if searching:
-                    self._add("경로 탐색 완료")
-            elif "path_failed" not in self._flags:
-                self._flags.add("path_failed")
-                self._add("경로 탐색 실패", "warn")
+            if searching:
+                self._add("경로 탐색 완료")
 
     def move_start(self):
         """4·9·17. 경로를 따라 실제로 움직이기 시작. 탐색 뒤 한 번만."""
@@ -210,7 +223,7 @@ class MissionLog:
     def retreat_done(self):
         """후퇴 종료. 다음 탐지·후퇴를 다시 남길 수 있게 플래그를 푼다."""
         with self._lock:
-            self._clear("threat", "retreat", "moving", "path_failed")
+            self._clear("threat", "retreat", "moving")
 
     # ── 교전 (ally-controller) ──────────────────────────
     def shots(self, fired, dist=None):
@@ -237,6 +250,25 @@ class MissionLog:
         """13. 적 전차 명중 (count/total)."""
         self._emit("적 전차 명중 (%d/%d)" % (count, total), "ok")
 
+    def ally_hp(self, hp):
+        """
+        아군 피격. /info 의 playerHealth 가 줄어드는 순간을 한 번의 피격으로 본다
+        (대시보드 체력 표시와 같은 기준). 값이 다시 늘어나면 새 에피소드로 보고 센 횟수를 비운다.
+        """
+        if hp is None:
+            return
+        with self._lock:
+            prev = getattr(self, "_my_hp", None)
+            self._my_hp = hp
+            if prev is None:
+                return
+            if hp > prev:
+                self._my_hits = 0
+                return
+            if hp < prev:
+                self._my_hits = getattr(self, "_my_hits", 0) + 1
+                self._add("아군 피격 (누적 %d회)" % self._my_hits, "warn")
+
     def shot_missed(self):
         """포탄이 적 전차에 맞지 않았다."""
         self._emit("빗나감")
@@ -251,5 +283,27 @@ class MissionLog:
             return {"epoch": self._epoch, "phase": self._phase,
                     "events": [e for e in self._events if e["id"] > after]}
 
+
+
+def _guard(fn):
+    """
+    로그 기록이 실패해도 호출한 제어 코드(주행/사격)가 끊기지 않게 한다.
+    이 모듈은 화면 표시용이라, 여기서 예외가 나도 조용히 넘기고 콘솔에만 남긴다.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            print("[mission_log] 기록 실패(무시): %s: %s" % (type(exc).__name__, exc))
+            return None
+    return wrapper
+
+
+# snapshot 은 /mission_log 응답을 만드는 조회용이라 제외한다.
+for _name in ("reset", "set_phase", "set_time", "dest_set", "path_search", "path_found",
+              "move_start", "arrived", "tank_detected", "retreat", "retreat_done",
+              "shots", "enemy_hit", "ally_hp", "shot_missed", "enemy_destroyed"):
+    setattr(MissionLog, _name, _guard(getattr(MissionLog, _name)))
 
 mission_log = MissionLog()

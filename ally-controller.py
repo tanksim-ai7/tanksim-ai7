@@ -130,6 +130,7 @@ def info():
 
     # 작전 로그의 시각(시뮬레이션 시간).
     mission_log.set_time(data.get("time"))
+    mission_log.ally_hp(data.get("playerHealth"))
 
     # 기존 인식팀 /info 처리.
     tskijun.info()
@@ -163,6 +164,9 @@ def info():
                 if ALLY_DEST_IDX == 2:
                     SEQ_FLAG = 'second'
     elif enemy_hit_count == 2:
+        # 카운트를 먼저 올린다. 목적지 계산(handle_set_destination)이 오래 걸리는 동안
+        # 동시에 들어온 다른 /info 가 같은 분기를 다시 타서 기지 목적지를 여러 번 설정하던 문제를 막는다.
+        enemy_hit_count += 1
         ALLY_DEST_LIST.append((280.0, 170.0))
         dest = {
             "destination": "280.0, 0, 170.0"
@@ -170,7 +174,6 @@ def info():
         # 아군 기지 복귀 단계. 목적지 설정 로그가 '기지'로 나오도록 먼저 바꾼다.
         mission_log.set_phase(PHASE_BASE)
         drive_controller.handle_set_destination(dest)
-        enemy_hit_count += 1
 
     threading.Thread(target=send_to_5100, args=(data, 'info'), daemon=True).start()
 
@@ -228,11 +231,14 @@ def get_action():
         rst_cmd["turretRF"] = turret_cmd["turretRF"]
         rst_cmd["fire"] = turret_cmd["fire"]
         # 새로 나간 포탄만 작전 로그에 남긴다(FireModule 의 누적 발사 수 기준).
-        pending = getattr(fm.log, "pending", None)
-        mission_log.shots(
-            fm.log.fired,
-            pending.get("dist") if isinstance(pending, dict) else None,
-        )
+        try:
+            pending = getattr(fm.log, "pending", None)
+            mission_log.shots(
+                fm.log.fired,
+                pending.get("dist") if isinstance(pending, dict) else None,
+            )
+        except Exception:
+            pass  # 로그용이라 실패해도 사격/주행 응답에는 영향을 주지 않는다.
 
     return jsonify(rst_cmd)
 
