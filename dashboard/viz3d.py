@@ -1104,8 +1104,11 @@ const LAYERS=[
  ['route','계획 경로',1],['trail','이동 궤적',1],['shots','탄도 · 탄착',1],
  ['foeshots','적 사격',1],
  ['los','사선',1],['rings','사거리 링',1],['aim','조준점',1],['ray','포신 지향선',1],
- ['known','인지 장애물',0],['foes','적 전차 (추정)',1],['mapobs','맵 원본 장애물',1],
+ ['known','인지 장애물',0],['danger','적 위험 지대',1],['foes','적 전차 (추정)',1],['mapobs','맵 원본 장애물',1],
  ['det','탐지 객체',1],['label','라벨 · HP',1],['grid','격자',0],['water','수면',1]];
+// 확인된 적 전차 주변 위험 지대 반지름 [m].
+// 플래너가 enemy_tank 주변에 까는 방어 패딩(±49칸)과 같은 값이다. 격자 1칸 = 1 m (300 m / 300칸).
+const DANGER_R=49;
 const L={}; LAYERS.forEach(([k,,v])=>L[k]=!!v);
 $('#layers').innerHTML=LAYERS.map(([k,n])=>
  `<label class="ck"><input type="checkbox" data-l="${k}" ${L[k]?'checked':''}>${n}</label>`).join('');
@@ -2144,6 +2147,7 @@ function applyLayers(){
   if(!RN) return;
   RN.mapG.visible=L.mapobs; RN.knownG.visible=L.known; RN.detG.visible=L.det;
   if(RN.foeG) RN.foeG.visible=L.foes;
+  if(RN.dangerG) RN.dangerG.visible=L.danger;
   RN.routeL.visible=L.route; RN.losL.visible=L.los;
   RN.trailMe.visible=RN.trailFoe.visible=L.trail;
   RN.ringMin.visible=RN.ringMax.visible=RN.ringSug.visible=L.rings;
@@ -2715,8 +2719,13 @@ function update3D(){
   });
 
   // 인지 장애물
+  //   개수가 같아도 타입이 바뀔 수 있다(스테레오가 Tank1 로 재분류하면 자연물 -> enemy_tank).
+  //   그래서 개수만 보지 않고, 자연물이 아닌 것들의 위치·타입까지 서명으로 비교한다.
   const kn=dv.known||[];
-  if(RN.knownG.children.length!==kn.length){
+  const knSig=kn.length+'|'+VS+'|'+kn.filter(o=>o.t!=='nature')
+    .map(o=>o.t+o.x0+','+o.z0).join(';');
+  if(RN.knownSig!==knSig){
+    RN.knownSig=knSig;
     RN.knownG.clear();
     const C={enemy_tank:0xef4444,enemy:0xf97316,team_tank:0x4b9cf5,
              team:0x60a5fa,unknown:0xeab308,nature:0x5b6b7d};
@@ -2729,7 +2738,45 @@ function update3D(){
           transparent:true,opacity:OP[o.t]!==undefined?OP[o.t]:.3,
           depthWrite:false}));
       const cx=(o.x0+o.x1)/2,cz=(o.z0+o.z1)/2;
-      m.position.copy(V(cx,cz,1.8)); RN.knownG.add(m);});
+      m.position.copy(V(cx,cz,1.8)); RN.knownG.add(m);
+      if(o.t==='enemy_tank'){
+        // 확인된 적 전차: 빨갛게 칠한다.
+        const fill=new THREE.Mesh(new THREE.BoxGeometry(w,3.2,d2),
+          new THREE.MeshBasicMaterial({color:0xef4444,transparent:true,
+            opacity:.85,depthWrite:false}));
+        fill.position.copy(m.position); RN.knownG.add(fill);
+      }});
+
+    // 적 위험 지대: 확인된 적 전차 중심에서 반지름 DANGER_R 의 빨간 반투명 원.
+    //   지형에 붙도록 원판의 점마다 지형 높이를 읽어 배치한다.
+    if(!RN.dangerG){RN.dangerG=new THREE.Group(); RN.sc.add(RN.dangerG); RN.dangerG.visible=L.danger;}
+    RN.dangerG.clear();
+    kn.filter(o=>o.t==='enemy_tank').forEach(o=>{
+      const cx=(o.x0+o.x1)/2,cz=(o.z0+o.z1)/2;
+      const geo=new THREE.RingGeometry(0.01,DANGER_R,72,10);
+      const pos=geo.attributes.position;
+      for(let i=0;i<pos.count;i++){
+        const q=V(cx+pos.getX(i),cz+pos.getY(i),1.2);
+        pos.setXYZ(i,q.x,q.y,q.z);
+      }
+      pos.needsUpdate=true;
+      const disc=new THREE.Mesh(geo,new THREE.MeshBasicMaterial({color:0xef4444,
+        transparent:true,opacity:.30,side:THREE.DoubleSide,depthWrite:false,
+        polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2}));
+      disc.renderOrder=5; RN.dangerG.add(disc);
+      // 테두리: 1px 선은 거의 안 보여서 폭 1.4 m 의 띠로 그린다.
+      const rg=new THREE.RingGeometry(DANGER_R-1.4,DANGER_R,96,1);
+      const rp=rg.attributes.position;
+      for(let i=0;i<rp.count;i++){
+        const q=V(cx+rp.getX(i),cz+rp.getY(i),1.8);
+        rp.setXYZ(i,q.x,q.y,q.z);
+      }
+      rp.needsUpdate=true;
+      const rim=new THREE.Mesh(rg,new THREE.MeshBasicMaterial({color:0xff3b3b,
+        transparent:true,opacity:.85,side:THREE.DoubleSide,depthWrite:false,
+        polygonOffset:true,polygonOffsetFactor:-3,polygonOffsetUnits:-3}));
+      rim.renderOrder=6; RN.dangerG.add(rim);
+    });
   }
   // 탐지 객체
   const objs=(S.detect.objects||[]).filter(o=>o.x!=null||o.posX!=null);
